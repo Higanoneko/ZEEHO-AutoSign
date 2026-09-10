@@ -56,13 +56,11 @@ accounts:
   - name: "账号1"
     user_id: ""
     authorization: ""
-    cookie: ""
 
   # 更多账号请复制上面的账号块：
   # - name: "账号2"
   #   user_id: ""
   #   authorization: ""
-  #   cookie: ""
 """
 
 
@@ -75,7 +73,6 @@ class Account:
     user_id: str
     authorization: str
     name: str
-    cookie: str = ""
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any], index: int) -> "Account":
@@ -101,7 +98,6 @@ class Account:
                 or value.get("userName")
                 or "账号{}".format(index)
             ).strip(),
-            cookie=str(value.get("cookie") or "").strip(),
         )
 
 

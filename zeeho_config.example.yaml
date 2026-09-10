@@ -33,13 +33,12 @@ runtime:
 
 accounts:
   # 每个账号独立抓包一次；下表对应抓包请求头（详见 README 教程第 3 节）
+  # 注意：不需要 Cookie。鉴权只靠 authorization，抓包时不必复制 Cookie 头。
   - name: "账号1"
     user_id: ""                       # 请求头 user_id
     authorization: "Bearer ..."       # 请求头 Authorization（整行，可带或不带 Bearer）
-    cookie: ""                        # 请求头 Cookie（整行，会过期，过期后重新抓包）
 
   # 更多账号请复制上面的账号块：
   # - name: "账号2"
   #   user_id: ""
   #   authorization: ""
-  #   cookie: ""

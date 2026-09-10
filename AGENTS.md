@@ -8,7 +8,8 @@
 青龙面板每日自动签到「极核 ZEEHO」：签到走 H5 接口
 （`h5.zeehoev.com` `/cfmotoservermine/signin`），每个请求带应用签名头 `Cfmoto-X-*`。
 Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config.yaml`
-（已被 `.gitignore` 排除）：任何提交不得带入真实 token / cookie / user_id。
+（已被 `.gitignore` 排除）：任何提交不得带入真实 token / user_id；抓包文件（含 Cookie、
+设备标识）也在排除之列，不要为了举例把它们贴进文档或测试。
 
 ## 分层与依赖方向
 
@@ -69,7 +70,11 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
   配置支持直接粘贴 8/40 组 16 位二进制串，由脚本自动解码并写回
   （完整步骤见 README「🔑 教程」第 4 节）。
 - 业务 code：`10000` 成功；`repeatedly_operation` 已签/操作过快（按成功处理）；
-  `40000` 登录态或请求异常；`HTTP 401 invalid_token` = authorization/cookie 过期，需重新抓包。
+  `40000` 登录态或请求异常；`HTTP 401 invalid_token` = authorization 失效，需重新抓包。
+- **鉴权只靠 `authorization`（bearer），代码里没有 Cookie 这一层**：抓包请求头里的
+  `Cookie` 与鉴权无关，`Account` 不存该字段、`_headers()` 也不发该头。置空 Cookie 后签到
+  与每日任务实测全通，Loon 版同样从不读 Cookie 头。所以刷新登录态只需换 `authorization`
+  一个字段；抓包教程里不必再让用户复制那串 Cookie。
 - `signStatue`：`3`/`5` = 已签（今天的 `integralScore` 即本次得分）；`4` = 过去未签；`2` = 未来占位。
 - 可用积分来自 App 域 `tapi.zeehoev.com/v1.0/mine/cfmotoservermine/setting/{user_id}` 的
   `data.score`（`zeeho.SCORE_ENDPOINT`），与 H5 同一对密钥即可；只读，失败只跳过展示、不阻断签到。
@@ -85,7 +90,7 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
 ## 每日任务速查（动 `daily_tasks` / 社区接口必读）
 
 - 走原生 App 域 `tapi.zeehoev.com/v1.0`，鉴权只用 `authorization: bearer …`（无需
-  cookie / user_id / H5 那堆头）；签名同 H5 规则，`data` 对 GET/DELETE 是排序查询串、
+  Cookie / user_id / H5 那堆头）；签名同 H5 规则，`data` 对 GET/DELETE 是排序查询串、
   对 POST 是**实际发送的原始 JSON body**。PUT/DELETE 空请求体带 `Content-Length: 0`。
 - 四步链：`POST social/.../commonArticle`（发帖，响应只有 `data:true`，**不回帖 ID**）→
   重新 `GET social/.../community/mineArticleInfo?userId=` 定位新帖（复核）→

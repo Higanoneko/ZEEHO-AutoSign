@@ -419,8 +419,6 @@ class ZeehoClient:
             "interfaceversion": "2",
             "user_id": account.user_id,
         }
-        if account.cookie:
-            headers["Cookie"] = account.cookie
         if empty_body:
             headers["Content-Length"] = "0"
         headers.update(

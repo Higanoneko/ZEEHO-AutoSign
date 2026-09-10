@@ -102,12 +102,15 @@ accounts:
 |---|---|---|
 | `accounts[].user_id` | `user_id` | 用户 ID，例如 `20260825003041623` |
 | `accounts[].authorization` | `Authorization` | 整行复制，`Bearer` 前缀保留（脚本会自动补前缀，缺失也不影响） |
-| `accounts[].cookie` | `Cookie` | 整行复制（含 `JSESSIONID=…; acw_tc=…` 等），会过期 |
 | `accounts[].name` | —— | 仅日志显示用，随意命名 |
 
-登录态（`authorization` 与 `cookie`）**几周到几个月会过期**。过期后服务端返回
-`401 invalid_token` 或 `code=40000`，此时只需重新抓包刷新这两个字段即可，其他配置
-不用动。
+> **不需要 Cookie**：实际鉴权只靠 `Authorization`（bearer token），请求头里的 `Cookie`
+> 与鉴权无关，脚本已不再读取该字段（配置里写了也会被忽略）。这一结论有实测支撑：置空
+> Cookie 后签到与每日任务全部通过；Loon 版脚本同样全程不带 Cookie（它的 `getCookie()`
+> 其实只抓 `Authorization` / `User-Agent` 和响应体里的 `id`/`nickName`，从不读 Cookie 头）。
+
+只有 `authorization` 会过期。过期后服务端返回 `401 invalid_token` 或 `code=40000`，
+此时只需重新抓包刷新该字段，其他配置不用动。
 
 ### 4. 获取 `app.app_id` / `app.app_secret`（签名密钥）
 
@@ -156,7 +159,7 @@ accounts:
 
    如果已经手动解码过，也可以直接填明文：`app_id` 填 8 位字母数字（如
    `Sw5F9uJi`），`app_secret` 填 40 位十六进制。脚本只替换这两个字段对应的行，不会
-   改动 Cookie、User-Agent 等其它配置。
+   改动 User-Agent 等其它配置行。
 
 4. 顺手核对：抓包里任意 `h5.zeehoev.com` 请求的 `Cfmoto-X-Param` 请求头形如
    `appId=Sw5F9uJi&nonce=…&timestamp=…`，其中的 `appId` 应与 JS 里解出来的一致——这是
@@ -178,7 +181,7 @@ accounts:
 ### 6. 多账号
 
 `app` 段（签名密钥、UA）所有账号共用一份；要加第二个账号只需复制一个 `accounts` 块，
-为它抓包获取独立的 `user_id` / `authorization` / `cookie`。
+为它抓包获取独立的 `user_id` / `authorization`。
 
 ## 签名与动态时间戳（为什么不会像“回放”那样 430）
 
@@ -197,6 +200,52 @@ sign = MD5( SHA1hex( data + "appId=<id>&nonce=<uuid>&timestamp=<毫秒>" + app_s
 > 这也是为什么**不要用抓包工具的“回放”来验证签名接口**：回放会把抓包那一刻写死的
 > 时间戳原样重发，只要超过服务端允许的时间窗（实测约几十分钟内就会失效）就被网关拒
 > 绝，返回 `430 {"code":"30123"}`。Loon 可用、脚本可用，都是因为它们每次现算签名。
+
+## 实测 token 寿命（`tools/token_probe.py`）
+
+`authorization` 到底会不会自然过期，目前**没有定论**，因此仓库里带了一个只读探针来
+收集证据，而不是靠猜。
+
+```text
+python3 tools/token_probe.py        # 建议青龙每天 1~2 次，例如 */6 * * *
+```
+
+它每天发**一个只读 GET**（App 域 `signin/count`），把结果追加到配置文件同目录的
+`token_probe_log.jsonl`：时间、`http_status`、连签天数、今日是否已签、token 前 8 位。
+只读、幂等、不签到、不改配置，可以放心长期挂着。
+
+### 为什么需要它
+
+抓包只能看到"刚登录那几分钟"，永远看不到第 10 天会发生什么。探针是**被动观察**：
+它不依赖你开 App 的时机，能精确定位 token 死在哪一天、连签有没有断。
+
+### 判读方式
+
+`token` 前 8 位变化 = token 被换过（含你自己手动更新，注意记录）。对照下表：
+
+| 观察到的现象 | 结论 | 下一步 |
+|---|---|---|
+| 10 天后仍 `alive: true`、连签未断 | 服务端**滑动续期或不过期**，`expires_in` 是滚动值 | 无需续期实现，只加 401 告警 |
+| 某天变 `401`，次日又 `alive` 且 token 前 8 位变了 | App 静默换了新 token | 断点处抓包，看它用了哪个请求 |
+| 某天变 `401` 且一直不恢复、连签断开 | 硬性过期，且 App 不会自动续 | 用 unionid 走 `accountIsBind` 换 token |
+| 某天变 `401`，随后 App 走 `loginByClick`/`loginByPhone` | 靠重新登录而非刷新 | 同上，用 unionid 替代 |
+
+### 做实验期间的注意事项
+
+- **不要让主签到脚本继续用这条 token 跑**：脚本一旦 401 会诱导你手动换 token，污染实验。
+  需要签到就临时用另一条 token，或暂停几天。
+- 手动换过 token 一定要在日志里能看出来 —— 探针记录的 `token_prefix` 就是为此。
+- 想定位到"哪一天甚至哪个小时死"，把探针跑密一点（例如每 6 小时）。
+
+### 已经排除的机制
+
+以下都已实测排除，不必再试：
+
+- `refresh_token` 换新：`/oauth/token`（JSON/FORM/带 client 凭据）全部 401，`/user/refreshToken`
+  各种请求体形状都返回笼统的 `40000`（非 404 但那不是刷新端点）。
+- 设备指纹绑定：`loginByPhone` 请求头无任何设备标识，响应 `deviceModel`/`deviceSn` 均为 null。
+- 服务端校验签名时间戳的"未来方向"：实测 **+365 天的时间戳照样 200**，只拒绝过去的
+  时间戳。因此**改设备日期无法让 token 过期**。
 
 ## 签到流程与状态确认
 
@@ -315,8 +364,8 @@ sign = MD5( SHA1hex( data + "appId=<id>&nonce=<uuid>&timestamp=<毫秒>" + app_s
 | HTTP `430`，`code=30121` permit error | 签名密钥不匹配：`app_secret` 与 `app_id` 配对不上（密钥被服务端轮换，或误取了 JS 里 TEST/RELEASE 环境块的密钥） | 按“教程第 4 节”重新从当前 H5 JS 的 **`VUE_APP_PRODUCTION_CONFIG`** 提取 `appId`/`appSecret` |
 | HTTP `430`，`code=30123` permit error | 签名时间戳过期/超窗（常见于手工回放旧抓包请求） | 用脚本或 Loon 现算签名；Reqable 回放无法用于验证 |
 | HTTP `430`，`code=30000` permit error | 签名参数异常（如 nonce 为空） | 检查是否改坏了签名头/参数 |
-| HTTP `401` `invalid_token` | `authorization` 登录令牌过期 | 重新抓包刷新该账号的 `authorization`（必要时连同 `cookie`） |
-| HTTP `200`，`code=40000` / “网络开小差” | 登录态或请求异常 | 优先刷新 `authorization`/`cookie`；仍失败则核对 UA 与签名 |
+| HTTP `401` `invalid_token` | `authorization` 登录令牌失效 | 重新抓包刷新该账号的 `authorization` |
+| HTTP `200`，`code=40000` / “网络开小差” | 登录态或请求异常 | 优先刷新 `authorization`；仍失败则核对 UA 与签名 |
 | HTTP `200`，`code=repeatedly_operation` | 当天已签到或操作过快 | 正常，脚本按已签到处理 |
 | 本地 SSL 报错 | 本机残留抓包代理 | 清掉 `http_proxy`/`https_proxy` 环境变量，或确认 `runtime.use_proxy` |
 
