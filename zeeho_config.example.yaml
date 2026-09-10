@@ -1,0 +1,45 @@
+# ZEEHO 自动签到配置示例
+# 字段来源见 README「🔑 教程：如何抓到并填写各项配置」
+app:
+  # H5 前端 JS 中 VUE_APP_PRODUCTION_CONFIG 里的 appId：
+  # 可粘贴原网页中的 8 组 16 位二进制空格串（首次读取自动解码写回），
+  # 或直接填解码后的 8 位字母数字（当前 H5 版本为 Sw5F9uJi）。
+  app_id: ""
+  # 同上，取 appSecret 对应的 40 组 16 位二进制空格串，或解码后的 40 位十六进制；
+  # 密钥会被服务端轮换，报 HTTP 430 code=30121 时按 README 重新提取。
+  app_secret: ""
+  # 原生 App 域（tapi.zeehoev.com 社区/每日任务接口）专用密钥对，可空：
+  # 留空回退用上面的 H5 密钥签名（现有积分余额接口已验证同域可用）。
+  # 抓包里 App 请求的 Cfmoto-X-Param 内 appId 为 S7qPWPU1（App 内置另一对密钥）；
+  # 仅当上述回退报 430/30121 时才需要从 App JS 提取填这里。
+  tapi_app_id: ""
+  tapi_app_secret: ""
+  base_url: "https://h5.zeehoev.com"
+  # 必填：抓包 h5.zeehoev.com/cfmotoservermine/signin/info 请求头里的
+  # User-Agent 与 Zeeho-User-Agent 两个完整请求头。
+  user_agent: ""
+  zeeho_user_agent: ""
+
+runtime:
+  timeout_seconds: 15
+  use_proxy: false
+  notify: true
+  # 每日任务（发帖→喜欢→分享→删帖，前 3 步各 +1 积分，删帖为清理）
+  # 关闭填 false；当天已完成会自动跳过；脚本只认自己发的打卡帖，不会动真实帖子。
+  daily_tasks: true
+  # 自动发布的帖子正文；留空默认按当天日期生成，形如「9月9日打卡」
+  #（正文会短暂公开展示直到被删除，建议像普通用户一样写日期+打卡）。
+  daily_post_content: ""
+
+accounts:
+  # 每个账号独立抓包一次；下表对应抓包请求头（详见 README 教程第 3 节）
+  - name: "账号1"
+    user_id: ""                       # 请求头 user_id
+    authorization: "Bearer ..."       # 请求头 Authorization（整行，可带或不带 Bearer）
+    cookie: ""                        # 请求头 Cookie（整行，会过期，过期后重新抓包）
+
+  # 更多账号请复制上面的账号块：
+  # - name: "账号2"
+  #   user_id: ""
+  #   authorization: ""
+  #   cookie: ""
