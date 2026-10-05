@@ -19,15 +19,21 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
 |---|---|---|
 | `modules/config.py` | 配置读取/校验/原子写回 | 无外部请求；`Settings`/`Account` 是 frozen 值对象 |
 | `modules/zeeho.py` | 签名与请求 | H5 签到 + App 域(tapi)每日任务都在这里；`ZeehoClient` 是薄的注入式 IO 适配器；纯函数都在模块顶层 |
-| `modules/app.py` | 编排：逐账号 `sign_in` → `daily_tasks` → 汇总（连签/可用积分合计）→ 通知 | **全部展示文案都在这里**：`describe_signin` / `describe_task_step` / `describe_daily_result` / `describe_total_score` / `account_lines` |
+| `modules/app.py` | 编排：逐账号 `sign_in` → `claim_blind_box` → `daily_tasks` → `fetch_score`（领取/任务后重查余额）→ 汇总（连签/可用积分合计）→ 通知 | **全部展示文案都在这里**：`describe_signin` / `describe_blind_box` / `describe_task_step` / `describe_daily_result` / `describe_available_score` / `describe_total_score` / `final_score` / `account_lines` |
 | `modules/notification.py` | 青龙原生 `notify.py` 的窄适配 | 本地缺失时打印跳过，不要加推送依赖 |
 
 结果对象只描述事实、不带文案，渲染一律在 `app.py`：
 
 - `SignInResult`：`ok / already_signed / error / code / gained_points / continue_days /
   available_score`；失败时只有 `error`（原因），没有可直接打印的整句。
-- `DailyTaskResult`：`steps`（`TaskStep` 元组）+ `skipped` + `error`，`ok` 是 property
-  （`error` 为空且每一步都 ok）。卡在准备阶段时 `steps` 为空、原因在 `error`。
+- `DailyTaskResult`：`steps`（`TaskStep` 元组）+ `skipped` + `error` + `available_score`，
+  `ok` 是 property（`error` 为空且每一步都 ok）。卡在准备阶段时 `steps` 为空、原因在
+  `error`。`available_score` 由 `app.run()` 在整条任务链跑完后用
+  `client.fetch_score()` 回填（`dataclasses.replace`），表示**任务积分已入账**的真实余额；
+  None = 没开每日任务或那次查询失败。展示端一律用 `app.final_score(signin, daily)`：
+  优先它、退回落，不要在别处再推算余额。
+- 关闭每日任务时，领取盲盒后的余额由 `app.run()` 回填 `SignInResult.available_score`；
+  查询失败保留签到阶段的旧余额，仍统一通过 `final_score` 展示。
 - `TaskStep`：`key / ok / skipped / points / detail`，`key` 取 `STEP_POST` / `STEP_LIKE` /
   `STEP_SHARE` / `STEP_DELETE`；新增步骤时在 `app._STEP_LABELS` 补展示名。
 - 失败原因统一经 `zeeho.stage_error_detail(error, stage)` 剥掉重复的阶段前缀，再交给
@@ -42,8 +48,9 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
 一切依赖从参数进。副作用收口在两侧：
 
 - `ZeehoClient` 通过构造注入 `session` / `clock_ms` / `log`（测试可全部替身，线上默认见
-  `__init__`）；请求只发生在 `sign_in` 与 `daily_tasks` 两个生命周期里，且都遵循
-  「预检 → 动作 → 复核」的幂等模式（签到看 `signStatue`；每日任务看服务端进度+自己的帖子）。
+  `__init__`）；请求只发生在 `sign_in` / `claim_blind_box` / `daily_tasks` 生命周期 + 收尾的只读
+  `fetch_score`（余额）里，`sign_in` 与 `daily_tasks` 都遵循「预检 → 动作 → 复核」的
+  幂等模式（签到看 `signStatue`；每日任务看服务端进度+自己的帖子）。
 - `config.py` 允许的副作用只有「解码后原子写回配置文件」与提示打印，其余只读。
 
 约定：
@@ -78,7 +85,10 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
 - `signStatue`：`3`/`5` = 已签（今天的 `integralScore` 即本次得分）；`4` = 过去未签；`2` = 未来占位。
 - 可用积分来自 App 域 `tapi.zeehoev.com/v1.0/mine/cfmotoservermine/setting/{user_id}` 的
   `data.score`（`zeeho.SCORE_ENDPOINT`），与 H5 同一对密钥即可；只读，失败只跳过展示、不阻断签到。
-  报告末尾那行是各账号 `available_score` 的合计（`app.describe_total_score`）。
+  **余额只按事实取，不做推算**：任务行里的「积分+X」来自规则表 `integralNumber`，与余额无关。
+  `sign_in` 里那次查询早于盲盒和每日任务，单看它会少掉本次奖励；所以每个账号在任务链
+  跑完后由 `app.run()` 再查一次，报告末尾那行是这些最终余额的合计
+  （`app.final_score` + `app.describe_total_score`，取不到时退回落、都没有则标「未取到」）。
 - 连签天数以 App 域 `GET mine/cfmotoservermine/signin/count` 为准：`data.count` = 连续签到天数、
   `data.signStatus == 1` = 今天已签到（`signin_count_state` 解析，与 App 签到页同源）。
   `_streak` 只在它不可用时才退回 H5 明细推算，因此跨月补查请求只发生在兜底路径；
@@ -86,6 +96,14 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
 - 签到 `POST /cfmotoservermine/signin` 的响应 `data.integralScore` 就是本次得分（抓包实测），
   `zeeho.signin_payload_points` 把它当兜底：明细复核失败时也能报告积分。
 - `Zeeho-User-Agent` 中间的 UUID 每次请求都变，但服务端不校验，配置里写死即可。
+
+## 盲盒领取约定（动 `claim_blind_box` 必读）
+
+- 资格只看 H5 `signin/info` 的 `data.signCount`，它与 App `signin/count` 的
+  连签天数 `data.count` 不是同一个字段；缺失进度时报告失败，不能用连签天数替代。
+- 领取接口虽为 GET，但会开奖：超时或失败时本次运行不重试；
+  `repeatedly_operation` 可能是操作过快，不能像签到那样直接认作成功。
+  下次运行重新读服务端进度；真实服务器是否立即重置进度仍需实测。
 
 ## 每日任务速查（动 `daily_tasks` / 社区接口必读）
 
@@ -117,7 +135,8 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
 
 - 跑全部测试：`python -m unittest discover -s tests -v`
   （Windows 下若 TEMP 目录不可写，先把 `$env:TEMP` 指到工作区内的目录再跑）。
-- 报告/通知文案的用例在 `tests/test_app.py`（纯渲染，零网络）；改 `app.py` 的文案必须
+- 报告/通知文案的用例在 `tests/test_app.py`（纯渲染，零网络；`RunTests` 用替身
+  `ZeehoClient` 覆盖编排顺序——余额必须在 `daily_tasks` 之后查）；改 `app.py` 的文案必须
   同步改它，`format_results` 的整段输出在那里按行断言。
 - 改请求头/字段前，先对照仓库根 `tapi.zeehoev.com_*.har` 里真实请求的结构；
   抓包教程、字段来源、常见错误对照表都以 `README.md` 为准，不要另造一套说法。

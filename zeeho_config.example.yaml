@@ -24,6 +24,8 @@ runtime:
   timeout_seconds: 15
   use_proxy: false
   notify: true
+  # 签到盲盒：服务端 signCount 达到 30 时自动领取；关闭填 false。
+  blind_box: true
   # 每日任务（发帖→喜欢→分享→删帖，前 3 步各 +1 积分，删帖为清理）
   # 关闭填 false；当天已完成会自动跳过；脚本只认自己发的打卡帖，不会动真实帖子。
   daily_tasks: true

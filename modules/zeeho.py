@@ -22,6 +22,8 @@ _SIGNED_STATUES = frozenset({"3", "5"})
 SCORE_ENDPOINT = "https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/setting/{user_id}"
 # App 端签到状态（连签天数 + 今日是否已签），与 App 签到页显示的是同一个数字
 TAPI_SIGNIN_COUNT_PATH = "/v1.0/mine/cfmotoservermine/signin/count"
+BLIND_BOX_PATH = "/cfmotoservermine/signin/supplementPrize"
+BLIND_BOX_THRESHOLD = 30
 
 # ---- 每日任务（发帖→喜欢→分享→删帖）：原生 App 域 tapi 接口 ----
 TAPI_BASE = "https://tapi.zeehoev.com"
@@ -76,6 +78,18 @@ class SignInResult:
 
 
 @dataclass(frozen=True)
+class BlindBoxResult:
+    """签到盲盒结果；sign_count 是 H5 奖励进度，独立于 App 连签天数。"""
+
+    ok: bool
+    skipped: bool = False
+    sign_count: Optional[int] = None
+    gained_points: int = 0
+    prize_name: str = ""
+    error: str = ""
+
+
+@dataclass(frozen=True)
 class TaskRule:
     """getByUserId 规则表里的一条每日任务规则。"""
 
@@ -110,12 +124,18 @@ class TaskStep:
 
 @dataclass(frozen=True)
 class DailyTaskResult:
-    """每日任务链结果：steps 为空表示卡在准备阶段（见 error）。"""
+    """每日任务链结果：steps 为空表示卡在准备阶段（见 error）。
+
+    available_score 是任务链跑完后重新查到的可用积分余额（由编排层在整条链结束
+    后回填，`ZeehoClient.fetch_score`）；None 表示没查（未开每日任务）或查询失败。
+    展示时优先用它，因为它已经包含本次任务赚到的积分。
+    """
 
     account: Account
     steps: Tuple[TaskStep, ...] = ()
     skipped: bool = False
     error: str = ""
+    available_score: Optional[int] = None
 
     @property
     def ok(self) -> bool:
@@ -382,6 +402,28 @@ def signin_payload_points(payload: Optional[Mapping[str, Any]]) -> int:
     if not isinstance(data, Mapping):
         return 0
     return _as_int(data.get("integralScore"))
+
+
+def blind_box_sign_count(payload: Optional[Mapping[str, Any]]) -> Optional[int]:
+    """解析 H5 盲盒进度；缺失或畸形时返回 None，不能用连签天数代替。"""
+    data = payload.get("data") if isinstance(payload, Mapping) else None
+    raw = data.get("signCount") if isinstance(data, Mapping) else None
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def blind_box_reward(payload: Mapping[str, Any]) -> Tuple[int, str]:
+    """读取实际奖励；兼容参考实现的 integral / integralScore 两种字段。"""
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        return 0, ""
+    points = _as_int(data.get("integral") or data.get("integralScore"))
+    return points, str(data.get("prizesName") or "")
 
 
 class ZeehoClient:
@@ -975,6 +1017,51 @@ class ZeehoClient:
             )
             return payload, "{}失败：code={}，message={}".format(stage, code, message)
         return payload, ""
+
+    def claim_blind_box(self, account: Account) -> BlindBoxResult:
+        """查询服务端奖励进度后领取一次；失败不重试，避免重复开奖。"""
+        today = date.today().isoformat()
+        payload, error = self._sign_info(account, today[:7], "盲盒资格查询")
+        if error:
+            return BlindBoxResult(
+                False, error=stage_error_detail(error, "盲盒资格查询")
+            )
+        sign_count = blind_box_sign_count(payload)
+        if sign_count is None:
+            return BlindBoxResult(False, error="签到信息缺少有效的 signCount")
+        if sign_count < BLIND_BOX_THRESHOLD:
+            return BlindBoxResult(True, skipped=True, sign_count=sign_count)
+
+        _, reward, error = self._request_json(
+            "盲盒领取",
+            "GET",
+            BLIND_BOX_PATH,
+            self._headers(account, signing_data="supplementDate=" + today),
+            params={"supplementDate": today},
+        )
+        if error:
+            return BlindBoxResult(
+                False,
+                sign_count=sign_count,
+                error=stage_error_detail(error, "盲盒领取"),
+            )
+        code = str((reward or {}).get("code") or "")
+        if code != "10000":
+            message = str(
+                (reward or {}).get("message") or (reward or {}).get("msg") or "<空>"
+            )
+            return BlindBoxResult(
+                False,
+                sign_count=sign_count,
+                error="code={}，message={}".format(code or "<空>", message),
+            )
+        points, name = blind_box_reward(reward)
+        return BlindBoxResult(
+            True,
+            sign_count=sign_count,
+            gained_points=points,
+            prize_name=name,
+        )
 
     def sign_in(self, account: Account) -> SignInResult:
         today = date.today().isoformat()

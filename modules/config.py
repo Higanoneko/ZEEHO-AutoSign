@@ -47,6 +47,8 @@ runtime:
   timeout_seconds: 15
   use_proxy: false
   notify: true
+  # 签到盲盒：服务端 signCount 达到 30 时自动领取
+  blind_box: true
   # 每日任务（发帖→喜欢→分享→删帖，前 3 步各 +1 积分，删帖为清理）
   daily_tasks: true
   # 自动发布的帖子正文；留空默认按当天日期生成，形如「9月9日打卡」
@@ -117,6 +119,7 @@ class Settings:
     tapi_app_secret: str = ""
     daily_tasks: bool = True
     daily_post_content: str = ""
+    blind_box: bool = True
 
 
 def get_config_path() -> Path:
@@ -366,4 +369,5 @@ def load_settings(config_path: Optional[Path] = None) -> Settings:
             runtime.get("daily_tasks"), "runtime.daily_tasks", True
         ),
         daily_post_content=str(runtime.get("daily_post_content") or "").strip(),
+        blind_box=_config_bool(runtime.get("blind_box"), "runtime.blind_box", True),
     )
