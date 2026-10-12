@@ -4,7 +4,48 @@ from pathlib import Path
 
 import yaml
 
-from modules.config import ConfigError, CONFIG_TEMPLATE, load_settings
+from modules.config import ConfigError, CONFIG_TEMPLATE, extract_h5_credentials, load_settings
+
+
+class ExtractCredentialsTests(unittest.TestCase):
+    app_id = "TestApp1"
+    secret = "0123456789abcdef" * 2 + "01234567"
+
+    def source(self, fields=("i1", "s1")):
+        import json
+        encode = lambda value: " ".join("{:08b}00000000".format(ord(char)) for char in value)
+        return json.dumps({
+            "VUE_APP_TEST_CONFIG": {fields[0]: encode("WrongId1"), fields[1]: encode("f" * 40)},
+            "VUE_APP_PRODUCTION_CONFIG": {fields[0]: encode(self.app_id), fields[1]: encode(self.secret)},
+        })
+
+    def test_current_and_legacy_keys_select_only_production(self):
+        for fields in [("i1", "s1"), ("appId", "appSecret")]:
+            with self.subTest(fields=fields):
+                self.assertEqual(extract_h5_credentials(self.source(fields)), (self.app_id, self.secret))
+
+    def test_hex_escaped_and_json_string_literals(self):
+        import json
+        source = self.source()
+        for value in [source.replace('"', r'\x22').replace(' ', r'\x20'), json.dumps(source)]:
+            with self.subTest(value=value):
+                self.assertEqual(extract_h5_credentials(value), (self.app_id, self.secret))
+
+    def test_plain_credentials_and_identical_duplicates(self):
+        source = '{"VUE_APP_PRODUCTION_CONFIG":{"appId":"TestApp1","appSecret":"' + self.secret + '"}}'
+        self.assertEqual(extract_h5_credentials(source + source), (self.app_id, self.secret))
+
+    def test_missing_invalid_and_conflicting_production_keys_fail_closed(self):
+        for source in [
+            '{"VUE_APP_TEST_CONFIG":{}}',
+            '{"VUE_APP_PRODUCTION_CONFIG":{}}',
+            '{"VUE_APP_PRODUCTION_CONFIG":{"i1":"bad","s1":"bad"}}',
+            self.source() + self.source().replace("0101010000000000", "0101100000000000"),
+            '{"VUE_APP_PRODUCTION_CONFIG":{"i1": invalid}}',
+        ]:
+            with self.subTest(source=source):
+                with self.assertRaises(ConfigError):
+                    extract_h5_credentials(source)
 
 
 class ConfigTests(unittest.TestCase):

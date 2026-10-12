@@ -3,7 +3,8 @@
 app:
   # H5 前端 JS 中 VUE_APP_PRODUCTION_CONFIG 里的 appId：
   # 可粘贴原网页中的 8 组 16 位二进制空格串（首次读取自动解码写回），
-  # 或直接填解码后的 8 位字母数字（当前 H5 版本为 Sw5F9uJi）。
+  # 或直接填解码后的 8 位字母数字（H5 2.94.20 本次解析为 AiTXmBrm）。
+  # 新版 JS 中 i1/s1 对应 appId/appSecret，也可用 tools/extract_h5_credentials.py 提取。
   app_id: ""
   # 同上，取 appSecret 对应的 40 组 16 位二进制空格串，或解码后的 40 位十六进制；
   # 密钥会被服务端轮换，报 HTTP 430 code=30121 时按 README 重新提取。
@@ -15,14 +16,14 @@ app:
   tapi_app_id: ""
   tapi_app_secret: ""
   base_url: "https://h5.zeehoev.com"
-  # 必填：抓包 h5.zeehoev.com/cfmotoservermine/signin/info 请求头里的
+  # 必填：抓包 h5.zeehoev.com/cfmotoservermine/H5/signin/info 请求头里的
   # User-Agent 与 Zeeho-User-Agent 两个完整请求头。
   user_agent: ""
   zeeho_user_agent: ""
 
 runtime:
-  # 签到方案：h5（默认）或 smart（需填写上面的原生 App 密钥对）。
-  # smart 使用 /signin?server_name=SMART 的 GET → POST → GET 链路。
+  # 签到方案：h5（默认，已迁移到 /H5/signin）或 smart（旧接口兼容方案）。
+  # 当前服务端优先使用 h5 + 新生产密钥；smart 需填写上面的原生 App 密钥对。
   signin_mode: h5
   timeout_seconds: 15
   use_proxy: false

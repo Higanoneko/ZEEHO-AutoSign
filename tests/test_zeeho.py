@@ -11,6 +11,8 @@ import requests
 from modules.config import Account, Settings
 from modules.zeeho import (
     BLIND_BOX_PATH,
+    H5_SIGNIN_PATH,
+    H5_SIGNIN_INFO_PATH,
     blind_box_reward,
     blind_box_sign_count,
     STEP_DELETE,
@@ -35,6 +37,7 @@ from modules.zeeho import (
     count_previous_month_tail,
     count_streak,
     create_signature,
+    app_signature_headers,
     daily_task_rules,
     signin_count_state,
     signin_payload_points,
@@ -319,6 +322,31 @@ class BlindBoxTests(unittest.TestCase):
 
 
 class SignatureTests(unittest.TestCase):
+    def test_app_redundant_headers_use_the_same_signature_parameters(self):
+        signature = create_signature("native-app", "fake-secret", data="a=1{}", timestamp_ms=123, nonce="fixed-nonce")
+        headers = app_signature_headers(signature)
+        self.assertEqual(headers["appid"], "native-app")
+        self.assertEqual(headers["timestamp"], "123")
+        self.assertEqual(headers["nonce"], "fixed-nonce")
+        self.assertEqual(headers["signature"], signature["Cfmoto-X-Sign"])
+        self.assertEqual(headers["Cfmoto-X-Param"], signature["Cfmoto-X-Param"])
+        self.assertEqual(len(signature), 3)
+
+    def test_native_headers_preserve_configured_device_and_do_not_send_cookie(self):
+        session = Mock()
+        config = make_settings()
+        client = ZeehoClient(config, session=session, clock_ms=lambda: 123)
+        account = Account("test-user", "Bearer test-token", "test")
+        first = client._tapi_headers(account)
+        second = client._tapi_headers(account)
+        for headers in [first, second]:
+            self.assertEqual(headers["User-Agent"], config.zeeho_user_agent)
+            self.assertEqual(headers["X-App-Info"], config.zeeho_user_agent)
+            self.assertEqual(headers["interfaceversion"], "2")
+            self.assertNotIn("Cookie", headers)
+            self.assertEqual(headers["timestamp"], "123")
+        self.assertNotEqual(first["nonce"], second["nonce"])
+
     def test_signature_matches_reference_algorithm(self):
         result = create_signature(
             "app", "secret", timestamp_ms=123, nonce="fixed-nonce"
@@ -389,7 +417,7 @@ class SignatureTests(unittest.TestCase):
         entries[13]["signStatue"] = 4  # 9-14 断签
         self.assertEqual(count_previous_month_tail(entries), 1)
 
-    def test_sign_in_uses_precheck_empty_post_and_confirmation(self):
+    def test_sign_in_uses_migrated_paths_signed_json_body_and_confirmation(self):
         precheck = response(
             200, {"code": "10000", "message": "操作成功", "data": {"nowSignDetailVos": []}}
         )
@@ -434,8 +462,43 @@ class SignatureTests(unittest.TestCase):
             ("GET", "https://tapi.zeehoev.com" + TAPI_SIGNIN_COUNT_PATH),
         )
         sent_post = session.post.call_args
-        self.assertEqual(sent_post.kwargs["data"], b"")
-        self.assertEqual(sent_post.kwargs["headers"]["Content-Length"], "0")
+        self.assertEqual(sent_post.args[0], "https://example.test" + H5_SIGNIN_PATH)
+        self.assertEqual(session.get.call_args_list[0].args[0], "https://example.test" + H5_SIGNIN_INFO_PATH)
+        self.assertEqual(session.get.call_args_list[1].args[0], "https://example.test" + H5_SIGNIN_INFO_PATH)
+        self.assertEqual(sent_post.kwargs["data"], b"{}")
+        self.assertEqual(sent_post.kwargs["headers"]["Content-Length"], "2")
+        headers = sent_post.kwargs["headers"]
+        expected = hashlib.md5(hashlib.sha1(
+            ("{}" + headers["Cfmoto-X-Param"] + "test-secret").encode()
+        ).hexdigest().encode()).hexdigest()
+        self.assertEqual(headers["Cfmoto-X-Sign"], expected)
+
+    def test_blind_box_day_zero_is_already_signed(self):
+        session = Mock()
+        session.get.side_effect = [
+            response(200, {"code": "10000", "data": {
+                "nowSignDetailVos": [signed_entry(15, score=10, status="0")]
+            }}),
+            response(200, {"code": "10000", "data": {"score": 100}}),
+        ]
+        session.request.return_value = count_response(1, True)
+        with mock.patch("modules.zeeho.date", FakeDate):
+            result = ZeehoClient(make_settings(), session=session).sign_in(
+                Account("1", "Bearer test-token", "test")
+            )
+        self.assertTrue(result.ok)
+        self.assertTrue(result.already_signed)
+        self.assertEqual(result.gained_points, 10)
+        session.post.assert_not_called()
+
+    def test_streak_stops_at_previous_blind_box_boundary(self):
+        entries = [signed_entry(day) for day in range(1, 16)]
+        entries[9]["signStatue"] = "0"
+        self.assertEqual(count_streak(entries, FIXED_TODAY.isoformat(), FIXED_MONTH), (5, False))
+        entries[14]["signStatue"] = 0
+        self.assertEqual(count_streak(entries, FIXED_TODAY.isoformat(), FIXED_MONTH), (5, False))
+        self.assertEqual(count_previous_month_tail(entries[:10]), 0)
+        self.assertEqual(count_previous_month_tail(entries[:12]), 2)
 
     def test_sign_in_falls_back_to_points_from_signin_response(self):
         # 签到接口响应自带 data.integralScore；明细复核里没有积分时也用得上

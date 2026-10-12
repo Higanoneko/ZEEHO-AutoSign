@@ -3,7 +3,7 @@
 面向青龙面板的 ZEEHO（极核）自动签到脚本。项目主目录只有一个 Python 任务入口
 `zeeho_auto_sign.py`，账号配置、请求签名、运行编排和青龙通知均放在独立模块中。
 
-签到走的是 H5 接口（`https://h5.zeehoev.com/cfmotoservermine/signin`），与 Loon 脚本
+签到走的是 H5 接口（`https://h5.zeehoev.com/cfmotoservermine/H5/signin`），与 Loon 脚本
 用的是同一套接口和签名机制，抓包填写配置后，脚本就能在电脑或青龙上独立运行。
 每次运行会先模拟 App 进入前台以保持登录会话，说明见下文。
 签到完成后会自动查询并领取已解锁的签到盲盒，
@@ -91,10 +91,10 @@ accounts:
 
 手机打开极核 App → 进入“签到”页（H5 页面 `h5.zeehoev.com/activity/signin`）→ 触发
 一次签到/状态刷新。在抓包列表中过滤域名 `h5.zeehoev.com`，找到这些请求（路径含
-`cfmotoservermine/signin`）：
+`cfmotoservermine/H5/signin`）：
 
-- `GET /cfmotoservermine/signin/info?month=YYYY-M` —— 查询当月签到明细
-- `POST /cfmotoservermine/signin` —— 执行签到
+- `GET /cfmotoservermine/H5/signin/info?month=YYYY-M` —— 查询当月签到明细
+- `POST /cfmotoservermine/H5/signin` —— 执行签到
 - `POST /cfmotoservermine/signInSupplement/count` —— 补签卡数量（辅助请求，无需填写）
 
 以 **`signin/info`** 这个 GET 请求为准，下面要抄的值全在它的请求头里。
@@ -122,10 +122,11 @@ accounts:
 
 ### 4. 获取 `app.app_id` / `app.app_secret`（签名密钥）
 
-这两项**不会出现在任何请求头里**（请求头只有签名结果），是 H5 前端 JS 内置的“应用级”
-常量，服务端按 `appId` 找到对应密钥来校验每次请求的签名。它们对所有账号通用，但
-**前端改版后可能轮换**（例如旧版 H5 用 `S7qPWPU1`，新版本 2.93.5 已换成独立密钥），
-若突然报“签名被拒”通常是它们过期了，需要重新提取。
+`appId` 可从请求头 `Cfmoto-X-Param` 读取；**`appSecret` 不会出现在请求头里**，需要从
+H5 前端 JS 提取。服务端按 `appId` 找到对应密钥来校验每次请求的签名，它们对所有账号通用，但
+**前端改版后可能轮换**。2026-10 的 H5 2.94.20 使用 `AiTXmBrm`，并把签到、明细、
+盲盒迁移到 `/cfmotoservermine/H5/signin` 前缀。更新密钥后仍使用旧路径也可能返回
+`430/30125`；需同时更新脚本和生产密钥，不能把所有 `permit error` 都认作密钥过期。
 
 提取步骤：
 
@@ -135,12 +136,14 @@ accounts:
 2. 在 JS 中搜索关键字 `VUE_APP_PRODUCTION_CONFIG`，会看到一段 JSON，形如：
 
    ```text
-   "appId":"0111000000000000 0110110000000000 ..."(共 8 组 16 位二进制)
-   "appSecret":"0011010000000000 0110001000000000 ..."(共 40 组 16 位二进制)
+   "i1":"0100000100000000 0110100100000000 ..."(共 8 组 16 位二进制)
+   "s1":"0011011100000000 0011000000000000 ..."(共 40 组 16 位二进制)
    ```
 
    > 每组 16 位二进制的前 8 位是该字符的 ASCII 码、后 8 位恒为 0。`appId` 解码后是
-   > 8 位字母数字（当前为 `Sw5F9uJi`），`appSecret` 解码后是 40 位十六进制字符串。
+   > 8 位字母数字（本次解析为 `AiTXmBrm`），`appSecret` 解码后是 40 位十六进制字符串。
+   > 新版的 `i1/s1` 对应 `appId/appSecret`，运行时仍按 `parseInt(二进制, 2) >> 8`
+   > 解码。若 JS 显示 `\x22` / `\x20`，它们分别是引号/空格的转义，签名哈希算法没有变化。
 
    ⚠️ **同一份 JS 里其实有三块配置：`VUE_APP_TEST_CONFIG`（测试环境
    `h5-test.zeehoev.com`）、`VUE_APP_RELEASE_CONFIG`（预发 `h5-pre.zeehoev.com`）、
@@ -166,12 +169,22 @@ accounts:
    > 日志出现「已自动解码 … 并写回配置文件」即成功。
 
    如果已经手动解码过，也可以直接填明文：`app_id` 填 8 位字母数字（如
-   `Sw5F9uJi`），`app_secret` 填 40 位十六进制。脚本只替换这两个字段对应的行，不会
+   `AiTXmBrm`），`app_secret` 填 40 位十六进制。脚本只替换这两个字段对应的行，不会
    改动 User-Agent 等其它配置行。
 
 4. 顺手核对：抓包里任意 `h5.zeehoev.com` 请求的 `Cfmoto-X-Param` 请求头形如
-   `appId=Sw5F9uJi&nonce=…&timestamp=…`，其中的 `appId` 应与 JS 里解出来的一致——这是
+   `appId=AiTXmBrm&nonce=…&timestamp=…`，其中的 `appId` 应与 JS 里解出来的一致——这是
    一个无需打开 JS 就能确认 app_id 的捷径（但拿不到 secret，secret 仍要从 JS 提取）。
+
+也可以下载页面实际加载的 `app.*.js`，用离线工具提取：
+
+```bash
+python tools/extract_h5_credentials.py /path/to/app.js
+```
+
+工具只解析 `VUE_APP_PRODUCTION_CONFIG`，兼容 `i1/s1`、旧版 `appId/appSecret` 以及
+十六进制转义。它不执行 JS、不联网、不改配置，只输出可复制的 `app_id/app_secret`。
+找不到生产配置、字段无效或存在多组不同的生产密钥时会报错。
 
 ### 5. `app.user_agent` 与 `app.zeeho_user_agent`
 
@@ -235,6 +248,10 @@ HTTP 401/403 时才提示重新抓包更新 `authorization`。此接口用于保
 
 ### SMART 签到方案
 
+这是保留的旧接口兼容方案。当前已验证的新服务端方案是下文的 **H5 签到方案**，
+使用新生产密钥与 `/H5/signin` 路径；遇到旧 SMART 路径的 `30125` 时先切回
+`runtime.signin_mode: h5`。本文不把 SMART 参数视作通用的网关修复方式。
+
 支持参考 `ZEEHO-QL-Js` 的 SMART 链路。启用时配置：
 
 ```yaml
@@ -267,7 +284,7 @@ SMART 签到仍请求 `h5.zeehoev.com`，按以下顺序执行：
 拒绝，可先设置 `runtime.blind_box: false` 验证 SMART 签到。SMART 对当前账号的可用性
 需要填好原生密钥后实测；`30125` 尚无已确认的原因，不能仅凭该码判定密钥过期。
 
-`runtime.signin_mode` 默认是 `h5`，旧配置不写这个字段时行为保持不变。
+`runtime.signin_mode` 默认是 `h5`，旧配置不写这个字段时自动使用已迁移的新 H5 路径。
 
 ### H5 签到方案
 
@@ -277,14 +294,14 @@ SMART 签到仍请求 `h5.zeehoev.com`，按以下顺序执行：
    （只读）→ `data.count` = **连续签到天数**、`data.signStatus = 1` = **今天已签到**，
    与 App 签到页显示的是同一个数字。连签天数以它为准，接口不可用时才退回下面的 H5
    明细推算；`signStatus` 还用作签到后复核的兜底（见第 3 步）。
-1. **签到前查询**：`GET /cfmotoservermine/signin/info?month=YYYY-M`，在
+1. **签到前查询**：`GET /cfmotoservermine/H5/signin/info?month=YYYY-M`，在
    `data.nowSignDetailVos` 里找 `createDate == 今天` 的记录。
    - 若 `signStatue` 为已签到状态，直接返回“今日已签到”并读取当日积分，**不再发签到
      请求**（幂等，可放心每天定时跑）。
    - 月份写成 `2026-9` 还是 `2026-09` 服务端都接受，签名只覆盖你实际发送的查询串，
      两者自行保持一致即可。
-2. **执行签到**：未签到时 `POST /cfmotoservermine/signin`（空请求体，
-   `Content-Length: 0`，签名按上面的算法现算）。
+2. **执行签到**：未签到时 `POST /cfmotoservermine/H5/signin`（实际请求体为 `{}`，
+   `Content-Length: 2`，签名数据也包含 `{}`，按上面的算法现算）。
    - 业务 `code=10000` 表示成功；`repeatedly_operation` 表示今天已签过（或操作过快），
      同样按成功处理。
    - 该响应里已经带出 `data.integralScore`（本次积分），脚本用它作为本次得分的兜底值。
@@ -347,6 +364,7 @@ SMART 签到仍请求 `h5.zeehoev.com`，按以下顺序执行：
 | 值 | 含义 |
 |---|---|
 | `3` | 当天已签到（`integralScore` 有值，每天 +1） |
+| `0` | 已签到且已开盲盒的周期边界；预检跳过签到，明细兜底连签遇到此前的 `0` 停止 |
 | `5` | 已签到（部分补签场景的状态；脚本同样视为已签） |
 | `4` | 当天未签到（已过去的日子漏签） |
 | `2` | 未来日期的占位，无需处理 |
@@ -356,11 +374,11 @@ SMART 签到仍请求 `h5.zeehoev.com`，按以下顺序执行：
 `runtime.blind_box` 默认 `true`，旧配置不补字段也会启用；设为 `false` 可关闭。
 它独立于 `runtime.daily_tasks`，关闭社区任务仍会领取签到盲盒。
 
-签到成功（包含今日已签到）后，脚本重新查询 H5 `GET /cfmotoservermine/signin/info`，
+签到成功（包含今日已签到）后，脚本重新查询 H5 `GET /cfmotoservermine/H5/signin/info`，
 仅在服务端返回的 `data.signCount >= 30` 时调用：
 
 ```text
-GET /cfmotoservermine/signin/supplementPrize?supplementDate=YYYY-MM-DD
+GET /cfmotoservermine/H5/signin/supplementPrize?supplementDate=YYYY-MM-DD
 ```
 
 日期取运行当天，请求使用现有 H5 鉴权和动态签名，无需新增账号字段。盲盒奖励进度
@@ -409,10 +427,15 @@ GET /cfmotoservermine/signin/supplementPrize?supplementDate=YYYY-MM-DD
   分享或删除。
 
 > 说明：这些接口在原生 App 抓包里用 App 内置的密钥对签名（`appId=S7qPWPU1`），
-> 与 H5 的密钥对不同。脚本默认复用 H5 密钥对（与可用积分接口同域同规则，已验证
-> 可用）；万一服务端后续校验 App 专属密钥导致 `HTTP 430 code=30121`，可在
-> `app.tapi_app_id` / `app.tapi_app_secret` 填 App 的密钥对（支持粘贴二进制串，
-> 自动解码写回）。
+> 与 H5 的密钥对不同。当前版本建议成对填写 `app.tapi_app_id` / `app.tapi_app_secret`
+> （支持二进制串自动解码），供 App 连签状态、余额、保活和社区任务使用。未配置时保留
+> H5 密钥回退以兼容旧服务端，但新 H5 密钥用于 App 连签状态查询已实测被拒，原生 App
+> 配对可正常返回。H5 JS 提取工具输出的密钥应填 `app_id/app_secret`，不要混用。
+>
+> App 请求会同时发送 `appid/nonce/timestamp/signature` 与 `Cfmoto-X-*`，所有签名头
+> 派生自同一次签名；`User-Agent/X-App-Info` 使用配置里的 `zeeho_user_agent`，保持
+> 客户端标识稳定。协议迁移参考了 [ZEEHO 的签到云函数](https://github.com/cluck798/ZEEHO/blob/main/zeeho-miniprogram/cloudfunctions/signin/index.js)
+> 和 [新版面板请求实现](https://github.com/cluck798/ZEEHO/blob/main/script/zeeho_box_enhanced.js)。
 
 ## 常见错误对照表
 
@@ -420,6 +443,7 @@ GET /cfmotoservermine/signin/supplementPrize?supplementDate=YYYY-MM-DD
 |---|---|---|
 | HTTP `430`，`code=30121` permit error | 签名密钥不匹配：`app_secret` 与 `app_id` 配对不上（密钥被服务端轮换，或误取了 JS 里 TEST/RELEASE 环境块的密钥） | 按“教程第 4 节”重新从当前 H5 JS 的 **`VUE_APP_PRODUCTION_CONFIG`** 提取 `appId`/`appSecret` |
 | HTTP `430`，`code=30123` permit error | 签名时间戳过期/超窗（常见于手工回放旧抓包请求） | 用脚本或 Loon 现算签名；Reqable 回放无法用于验证 |
+| HTTP `430`，`code=30125` permit error | 已实测旧签到路径被拒、新 `/H5/signin/info` 路径放行；该码不能单独判定 token 或密钥过期 | 更新脚本和当前生产密钥，使用 `signin_mode: h5`；仍失败时对照新的实际请求 |
 | HTTP `430`，`code=30000` permit error | 签名参数异常（如 nonce 为空） | 检查是否改坏了签名头/参数 |
 | HTTP `401` `invalid_token` | `authorization` 登录令牌失效 | 重新抓包刷新该账号的 `authorization` |
 | HTTP `200`，`code=40000` / “网络开小差” | 登录态或请求异常 | 优先刷新 `authorization`；仍失败则核对 UA 与签名 |

@@ -15,14 +15,16 @@ import requests
 
 from .config import Account, Settings
 
-# signStatue ∈ {3,5} 视为当天已签到（5 常见于补签等场景）
-_SIGNED_STATUES = frozenset({"3", "5"})
+# 0 = 已签到且已开盲盒的周期边界；3/5 = 普通已签到/补签
+_SIGNED_STATUES = frozenset({"0", "3", "5"})
 
-# 可用积分余额来自原生 App 端用户信息接口；签名凭据与 H5 同一套
+# 可用积分余额来自原生 App 端用户信息接口，优先原生 App 签名凭据
 SCORE_ENDPOINT = "https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/setting/{user_id}"
 # App 端签到状态（连签天数 + 今日是否已签），与 App 签到页显示的是同一个数字
 TAPI_SIGNIN_COUNT_PATH = "/v1.0/mine/cfmotoservermine/signin/count"
-BLIND_BOX_PATH = "/cfmotoservermine/signin/supplementPrize"
+H5_SIGNIN_PATH = "/cfmotoservermine/H5/signin"
+H5_SIGNIN_INFO_PATH = H5_SIGNIN_PATH + "/info"
+BLIND_BOX_PATH = H5_SIGNIN_PATH + "/supplementPrize"
 BLIND_BOX_THRESHOLD = 30
 SMART_SIGNIN_PATH = "/cfmotoservermine/signin"
 SMART_SIGNING_DATA = "server_name=SMART"
@@ -178,6 +180,18 @@ def create_signature(
     }
 
 
+def app_signature_headers(signature: Mapping[str, str]) -> Dict[str, str]:
+    """由一次签名派生 App 冗余头，保持 appid/nonce/timestamp/signature 完全一致。"""
+    fields = dict(part.split("=", 1) for part in signature["Cfmoto-X-Param"].split("&"))
+    return {
+        **signature,
+        "appid": fields["appId"],
+        "nonce": fields["nonce"],
+        "timestamp": fields["timestamp"],
+        "signature": signature["Cfmoto-X-Sign"],
+    }
+
+
 def _is_signed_entry(entry: Any) -> bool:
     """单条签到记录是否已签到。"""
     return isinstance(entry, dict) and str(entry.get("signStatue")) in _SIGNED_STATUES
@@ -215,6 +229,9 @@ def count_streak(entries: list, today: str, month: str) -> Tuple[int, bool]:
     for index in range(today_index, -1, -1):
         if not _is_signed_entry(entries[index]):
             break
+        # 今天的盲盒日算已签；此前的盲盒日标记服务端重置连签周期。
+        if index != today_index and str(entries[index].get("signStatue")) == "0":
+            break
         streak += 1
 
     first_date = (
@@ -232,7 +249,7 @@ def count_previous_month_tail(entries: list) -> int:
     """统计上一个月末尾的连续已签到天数（从月末往回数，遇断签停止）。"""
     count = 0
     for entry in reversed(entries):
-        if _is_signed_entry(entry):
+        if _is_signed_entry(entry) and str(entry.get("signStatue")) != "0":
             count += 1
         else:
             break
@@ -694,11 +711,14 @@ class ZeehoClient:
         json_body: bool = False,
         empty_body: bool = False,
     ) -> Dict[str, str]:
-        """App 域请求头：仅带鉴权 + 签名，与可用积分查询同一套最小头部。"""
+        """App 域请求头：鉴权、同源签名头及配置中的稳定客户端标识。"""
         headers = {
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "zh-CN",
             "Authorization": account.authorization,
+            "User-Agent": self.settings.zeeho_user_agent,
+            "X-App-Info": self.settings.zeeho_user_agent,
+            "interfaceversion": "2",
         }
         if json_body:
             headers["Content-Type"] = "application/json; charset=UTF-8"
@@ -706,8 +726,10 @@ class ZeehoClient:
             headers["Content-Length"] = "0"
         app_id, app_secret = self._app_credentials()
         headers.update(
-            create_signature(
-                app_id, app_secret, data=signing_data, timestamp_ms=self.clock_ms()
+            app_signature_headers(
+                create_signature(
+                    app_id, app_secret, data=signing_data, timestamp_ms=self.clock_ms()
+                )
             )
         )
         return headers
@@ -1077,7 +1099,7 @@ class ZeehoClient:
         _, payload, error = self._request_json(
             stage,
             "GET",
-            "/cfmotoservermine/signin/info",
+            H5_SIGNIN_INFO_PATH,
             self._headers(account, signing_data=query),
             params={"month": month},
         )
@@ -1174,9 +1196,9 @@ class ZeehoClient:
         _, payload, error = self._request_json(
             "执行签到",
             "POST",
-            "/cfmotoservermine/signin",
-            self._headers(account, empty_body=True),
-            data=b"",
+            H5_SIGNIN_PATH,
+            {**self._headers(account, signing_data="{}"), "Content-Length": "2"},
+            data=b"{}",
         )
         if error:
             return SignInResult(

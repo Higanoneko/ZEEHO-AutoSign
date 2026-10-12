@@ -6,7 +6,7 @@
 ## 项目是什么
 
 青龙面板每日自动签到「极核 ZEEHO」：签到走 H5 接口
-（`h5.zeehoev.com` `/cfmotoservermine/signin`），每个请求带应用签名头 `Cfmoto-X-*`。
+（`h5.zeehoev.com` `/cfmotoservermine/H5/signin`），每个请求带应用签名头 `Cfmoto-X-*`。
 Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config.yaml`
 （已被 `.gitignore` 排除）：任何提交不得带入真实 token / user_id；抓包文件（含 Cookie、
 设备标识）也在排除之列，不要为了举例把它们贴进文档或测试。
@@ -83,7 +83,10 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
   `Cookie` 与鉴权无关，`Account` 不存该字段、`_headers()` 也不发该头。置空 Cookie 后签到
   与每日任务实测全通，Loon 版同样从不读 Cookie 头。所以刷新登录态只需换 `authorization`
   一个字段；抓包教程里不必再让用户复制那串 Cookie。
-- `signStatue`：`3`/`5` = 已签（今天的 `integralScore` 即本次得分）；`4` = 过去未签；`2` = 未来占位。
+- 新 H5 签到、明细和盲盒共享 `/cfmotoservermine/H5/signin` 前缀；签到 POST 发送 `{}`，
+  签名 data 也必须包含 `{}`。旧路径实测返回 `430/30125`，不能仅换密钥不换路径。
+- `signStatue`：`0`/`3`/`5` = 已签；`0` 还标记已开盲盒的周期边界，明细兜底连签
+  只把今天的 `0` 计入，遇到此前的 `0` 停止。`4` = 过去未签；`2` = 未来占位。
 - 可用积分来自 App 域 `tapi.zeehoev.com/v1.0/mine/cfmotoservermine/setting/{user_id}` 的
   `data.score`（`zeeho.SCORE_ENDPOINT`）；只读，失败只跳过展示、不阻断签到。
   **余额只按事实取，不做推算**：任务行里的「积分+X」来自规则表 `integralNumber`，与余额无关。
@@ -94,14 +97,15 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
   `data.signStatus == 1` = 今天已签到（`signin_count_state` 解析，与 App 签到页同源）。
   `_streak` 只在它不可用时才退回 H5 明细推算，因此跨月补查请求只发生在兜底路径；
   `signStatus` 还用作签到后复核的兜底（明细复核失败但 signStatus 由 0 变 1 ⇒ 判定签到成功）。
-- 签到 `POST /cfmotoservermine/signin` 的响应 `data.integralScore` 就是本次得分（抓包实测），
+- 签到 `POST /cfmotoservermine/H5/signin` 的响应 `data.integralScore` 就是本次得分（抓包实测），
   `zeeho.signin_payload_points` 把它当兜底：明细复核失败时也能报告积分。
 - `Zeeho-User-Agent` 中间的 UUID 每次请求都变，但服务端不校验，配置里写死即可。
 
 ## SMART 签到约定（动 `_sign_in_smart` 必读）
 
 - SMART 请求仍走 H5 域，但使用原生 App 密钥，GET/POST 都把 `server_name=SMART`
-  签入 data；密钥选择按接口方案决定，不能仅按域名决定。
+  签入 data；这是旧接口兼容选项，新服务端使用默认 h5 方案和新路径。
+  密钥选择按接口方案决定，不能仅按域名决定。
 - `smart_signin_state` 从 `lastTime/continueDays` 解析事实，畸形状态中止动作。
   SMART 的 `10000/repeatedly_operation` 均须 GET 复核今日已签才算成功；POST 失败
   或复核失败后本次不重试、不切换后端。盲盒资格仍只认 H5 `signCount`。
@@ -128,6 +132,8 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
 - 走原生 App 域 `tapi.zeehoev.com/v1.0`，鉴权只用 `authorization: bearer …`（无需
   Cookie / user_id / H5 那堆头）；签名同 H5 规则，`data` 对 GET/DELETE 是排序查询串、
   对 POST 是**实际发送的原始 JSON body**。PUT/DELETE 空请求体带 `Content-Length: 0`。
+- App 请求的 `appid/nonce/timestamp/signature` 冗余头由同一次签名派生；`User-Agent`
+  与 `X-App-Info` 使用配置中的 `zeeho_user_agent`，保持设备标识稳定，不随机换设备。
 - 四步链：`POST social/.../commonArticle`（发帖，响应只有 `data:true`，**不回帖 ID**）→
   重新 `GET social/.../community/mineArticleInfo?userId=` 定位新帖（复核）→
   `POST socialCommu/likeFavoriteInfo`（body `{"kindFlag":"0","postId":<id>}`）→
@@ -144,8 +150,9 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
   发帖前先看 1023：App 端今天已发过帖就不再重复发。点赞前先看条目 `userLikeStatus`
   （已赞直接跳过，避免对同一帖子重复 POST 可能变成取消）。
 - 抓包里这些社区请求签名用的是 App 内置密钥（`appId=S7qPWPU1`），与 H5 的
-  `Sw5F9uJi` 不同；脚本默认复用 H5 密钥（与积分余额接口同域同规则已验证），需要时可配
-  `app.tapi_app_id/tapi_app_secret` 覆盖（`Settings._app_credentials`）。
+  `AiTXmBrm` 不同；`_app_credentials` 优先用 `app.tapi_app_id/tapi_app_secret`，
+  未配置时保留回退 H5 的兼容路径。当前原生签到状态查询已实测需独立 App 配对，
+  不要把 H5 前端提取结果当作原生 App 密钥。
 - 发帖正文由 `runtime.daily_post_content` 决定，留空按当天日期生成（`task_post_content`），
   改动默认正文模板 = 同时改 `_TASK_STYLE_RE` 与相关测试，别让两处失配。
 

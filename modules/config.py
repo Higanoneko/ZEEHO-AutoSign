@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -216,6 +217,35 @@ def decode_app_secret(value: str) -> Tuple[str, bool]:
     if len(decoded) != 40 or any(char not in "0123456789abcdefABCDEF" for char in decoded):
         raise ConfigError("app.app_secret 解码结果不是 40 位十六进制字符串")
     return decoded.lower(), True
+
+
+def extract_h5_credentials(source: str) -> Tuple[str, str]:
+    """从 H5 JS 的生产配置提取密钥；只解析文本，不执行下载的 JavaScript。"""
+    # 兼容字符串表中的 \x22 / \x20 和 JSON 字符串的转义引号。
+    normalized = re.sub(
+        r"\\x([0-9a-fA-F]{2})", lambda match: chr(int(match.group(1), 16)), source
+    ).replace(r'\"', '"')
+    matches = re.findall(
+        r'["\']VUE_APP_PRODUCTION_CONFIG["\']\s*:\s*(\{[^{}]*\})', normalized
+    )
+    if not matches:
+        raise ConfigError("JS 中未找到 VUE_APP_PRODUCTION_CONFIG")
+    candidates = set()
+    for value in matches:
+        try:
+            config = json.loads(value)
+        except (ValueError, TypeError) as exc:
+            raise ConfigError("JS 中的生产配置不是有效 JSON") from exc
+        app_id, _ = decode_app_id(config.get("i1") or config.get("appId") or "")
+        app_secret, _ = decode_app_secret(config.get("s1") or config.get("appSecret") or "")
+        if not re.fullmatch(r"[A-Za-z0-9]{8}", app_id) or not re.fullmatch(
+            r"[0-9a-fA-F]{40}", app_secret
+        ):
+            raise ConfigError("生产配置缺少有效的 i1/s1 或 appId/appSecret")
+        candidates.add((app_id, app_secret))
+    if len(candidates) != 1:
+        raise ConfigError("JS 包含多组不同的生产密钥，请核对页面实际使用的配置")
+    return candidates.pop()
 
 
 def _replace_app_fields(
