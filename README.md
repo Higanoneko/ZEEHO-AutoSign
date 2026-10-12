@@ -5,7 +5,8 @@
 
 签到走的是 H5 接口（`https://h5.zeehoev.com/cfmotoservermine/signin`），与 Loon 脚本
 用的是同一套接口和签名机制，抓包填写配置后，脚本就能在电脑或青龙上独立运行。
-手机端登录续期的说明见下文。签到完成后会自动查询并领取已解锁的签到盲盒，
+每次运行会先模拟 App 进入前台以保持登录会话，说明见下文。
+签到完成后会自动查询并领取已解锁的签到盲盒，
 再执行 App 社区的「每日任务」
 （发帖 → 喜欢 → 分享 → 删帖，前 3 步各 +1 积分，删帖做清理，详见下文）。
 
@@ -58,6 +59,8 @@ runtime:
   timeout_seconds: 15
   use_proxy: false
   notify: true
+  # 会话保活：每次运行在签到前模拟 App 进入前台
+  session_keepalive: true
   # 签到盲盒：服务端奖励进度达到 30 时自动领取
   blind_box: true
   # 每日任务：发帖→喜欢→分享→删帖（前 3 步各 +1 积分，删帖为清理）
@@ -69,7 +72,6 @@ accounts:
   - name: "账号1"
     user_id: ""
     authorization: ""
-    cookie: ""
 ```
 
 `runtime.notify` 控制是否调用青龙通知。脚本直接导入与任务入口同目录、由青龙提供的
@@ -112,9 +114,9 @@ accounts:
 > Cookie 后签到与每日任务全部通过；Loon 版脚本同样全程不带 Cookie（它的 `getCookie()`
 > 其实只抓 `Authorization` / `User-Agent` 和响应体里的 `id`/`nickName`，从不读 Cookie 头）。
 
-根据实际使用反馈，手机端持续登录、使用 App 时会续期，现有 `authorization` 可继续沿用。
-脚本使用配置中的令牌，不执行登录或续期操作。若服务端明确返回 `401 invalid_token`，
-只需重新抓包刷新该字段，其他配置不用动；`code=40000` 也可能是其他请求异常。
+脚本使用配置中的令牌执行[会话保活](#会话保活)，不按令牌标称有效期主动停用它。
+若服务端明确返回 `401 invalid_token`，需重新抓包刷新 `authorization`；
+`code=40000` 也可能是其他请求异常，不能仅凭它判定令牌失效。
 
 ### 4. 获取 `app.app_id` / `app.app_secret`（签名密钥）
 
@@ -205,6 +207,28 @@ sign = MD5( SHA1hex( data + "appId=<id>&nonce=<uuid>&timestamp=<毫秒>" + app_s
 > 时间戳原样重发，只要超过服务端允许的时间窗（实测约几十分钟内就会失效）就被网关拒
 > 绝，返回 `430 {"code":"30123"}`。Loon 可用、脚本可用，都是因为它们每次现算签名。
 
+## 会话保活
+
+参考 `Reference/zeeho-ev-homeassistant` 的前台保活流程，每个账号在签到前调用一次：
+
+```text
+POST https://tapi.zeehoev.com/v1.0/app/cfmotoserverapp/app/scoreguiding/openApplication
+```
+
+请求使用当前 `authorization`，发送空请求体（`Content-Length: 0`），签名每次现算。
+密钥优先使用 `app.tapi_app_id/tapi_app_secret`，留空时沿用 H5 密钥。
+HTTP 200 且业务 `code=10000` 才记录保活成功。
+
+`runtime.session_keepalive` 默认开启，旧配置缺少该字段也会自动启用；设为 `false`
+即可关闭。参考项目每天保活一次，本项目由青龙定时任务驱动，建议至少每天运行一次；
+每次手动或定时运行均会尝试保活，无需额外进程或依赖。
+
+保活失败仍继续签到、盲盒与每日任务，不单独影响成功账号统计或退出码；日志和通知会
+显示警告。超时、签名错误、非 JSON 响应等本次不重试，下次运行再尝试；只有实际收到
+HTTP 401/403 时才提示重新抓包更新 `authorization`。此接口用于保持当前会话，
+不能恢复已经被服务端拒绝的令牌；脚本不会自动登录、刷新令牌或改写账号配置。
+长期保活效果需要结合每日运行后的服务端实际状态观察。
+
 ## 签到流程与状态确认
 
 每个账号依次执行（`modules/zeeho.py` 的 `sign_in`）：
@@ -232,11 +256,13 @@ sign = MD5( SHA1hex( data + "appId=<id>&nonce=<uuid>&timestamp=<毫秒>" + app_s
 ### 通知与日志格式
 
 签到、盲盒与每日任务跑完后，每个账号输出一个报告块，最后再汇总一行可用积分（日志里的
-`[签到]` / `[盲盒]` / `[任务]` / `[余额]` 行与通知内容一致）：
+`[会话]` / `[签到]` / `[盲盒]` / `[任务]` / `[余额]` 行与通知内容一致）：
 
 ```text
 共1个账号，成功1个，失败0个
 [1] Higanoneko：
+会话：
+✅ 会话保活成功
 签到：
 ✅ 签到成功：积分+1（已连签 4 天）
 盲盒：
@@ -249,6 +275,8 @@ sign = MD5( SHA1hex( data + "appId=<id>&nonce=<uuid>&timestamp=<毫秒>" + app_s
 可用积分：208
 ```
 
+- **会话行**：保活成功或失败警告；401/403 会提示更新 `authorization`。
+  关闭保活时仅在控制台说明已关闭，通知中省略该段。
 - **签到行**：`✅ 签到成功`（本次真的签了）/ `ℹ️ 今日已签到`（幂等跳过，不再发签到请求）/
   `❌ 签到失败：<原因>`。
   - **积分 +1**：签到后复核当天的 `integralScore`；若复核请求失败，退回签到接口响应里

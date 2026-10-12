@@ -8,6 +8,7 @@ from modules.app import (
     describe_blind_box,
     describe_daily_result,
     describe_signin,
+    describe_session_keepalive,
     describe_total_score,
     final_score,
     format_results,
@@ -22,6 +23,7 @@ from modules.zeeho import (
     DailyTaskResult,
     BlindBoxResult,
     SignInResult,
+    SessionKeepaliveResult,
     TaskStep,
 )
 
@@ -40,6 +42,7 @@ def make_settings(**overrides):
         use_proxy=False,
         notify=False,
         blind_box=False,
+        session_keepalive=False,
     )
     values.update(overrides)
     return Settings(**values)
@@ -279,6 +282,56 @@ class FormatResultsTests(unittest.TestCase):
 
 
 class RunTests(unittest.TestCase):
+    def test_keepalive_runs_before_signin_for_each_account(self):
+        second = Account("2", "Bearer second-test-token", "B")
+        client = mock.Mock()
+        client.keep_session_active.side_effect = [SessionKeepaliveResult(True), SessionKeepaliveResult(True)]
+        client.sign_in.return_value = signin(score=208)
+        code, output, _ = self._run(make_settings(
+            accounts=[ACCOUNT, second], session_keepalive=True, daily_tasks=False
+        ), client)
+        self.assertEqual(code, 0)
+        self.assertEqual(client.mock_calls, [
+            mock.call.keep_session_active(ACCOUNT), mock.call.sign_in(ACCOUNT),
+            mock.call.keep_session_active(second), mock.call.sign_in(second),
+        ])
+        self.assertIn("[会话] ✅ 会话保活成功", output)
+
+    def test_keepalive_failure_keeps_tasks_running_and_warns_in_notification(self):
+        for result in [
+            SessionKeepaliveResult(False, error="Timeout"),
+            SessionKeepaliveResult(False, error="HTTP 401", auth_expired=True),
+        ]:
+            with self.subTest(result=result):
+                client = mock.Mock()
+                client.keep_session_active.return_value = result
+                client.sign_in.return_value = signin(score=208)
+                client.claim_blind_box.return_value = BlindBoxResult(True, True, 29)
+                client.daily_tasks.return_value = full_day_task()
+                client.fetch_score.return_value = 211
+                with mock.patch("modules.app.send_notification") as notify:
+                    out = io.StringIO()
+                    with mock.patch("modules.app.load_settings", return_value=make_settings(
+                        session_keepalive=True, blind_box=True, notify=True
+                    )), mock.patch("modules.app.ZeehoClient", return_value=client), contextlib.redirect_stdout(out):
+                        code = run()
+                self.assertEqual(code, 0)
+                self.assertEqual(client.mock_calls, [
+                    mock.call.keep_session_active(ACCOUNT), mock.call.sign_in(ACCOUNT),
+                    mock.call.claim_blind_box(ACCOUNT), mock.call.daily_tasks(ACCOUNT),
+                    mock.call.fetch_score(ACCOUNT),
+                ])
+                self.assertIn(describe_session_keepalive(result), notify.call_args.args[1])
+                self.assertIn("可用积分：211", out.getvalue())
+
+    def test_disabled_keepalive_sends_no_request(self):
+        client = mock.Mock()
+        client.sign_in.return_value = signin(score=208)
+        code, output, _ = self._run(make_settings(daily_tasks=False), client)
+        self.assertEqual(code, 0)
+        client.keep_session_active.assert_not_called()
+        self.assertIn("[会话] ℹ️ 已关闭（runtime.session_keepalive=false）", output)
+
     def _run(self, settings, client):
         """跑一遍 run()，返回 (退出码, 控制台输出, 用的客户端替身)。"""
         out = io.StringIO()
@@ -405,6 +458,35 @@ class RunTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertEqual(output.splitlines()[-2], "可用积分：208")
+
+
+class DescribeSessionKeepaliveTests(unittest.TestCase):
+    def test_status_lines(self):
+        self.assertEqual(describe_session_keepalive(SessionKeepaliveResult(True)), "✅ 会话保活成功")
+        self.assertEqual(describe_session_keepalive(SessionKeepaliveResult(False, "Timeout")),
+                         "⚠️ 会话保活失败：Timeout，继续执行签到和任务")
+        self.assertEqual(describe_session_keepalive(SessionKeepaliveResult(False, "HTTP 403", True)),
+                         "⚠️ 会话保活被拒绝：HTTP 403，请重新抓包更新 authorization")
+
+    def test_report_includes_keepalive_without_changing_success_count(self):
+        content, all_ok = format_results(
+            ["A"], [signin(score=10)], [None],
+            keepalives=[SessionKeepaliveResult(False, "HTTP 401", True)],
+        )
+        self.assertTrue(all_ok)
+        self.assertEqual(content.splitlines(), [
+            "共1个账号，成功1个，失败0个",
+            "[1] A：",
+            "会话：",
+            "⚠️ 会话保活被拒绝：HTTP 401，请重新抓包更新 authorization",
+            "签到：",
+            "✅ 签到成功",
+            "盲盒：",
+            "ℹ️ 已关闭（runtime.blind_box=false）",
+            "任务：",
+            "ℹ️ 已关闭（runtime.daily_tasks=false）",
+            "可用积分：10",
+        ])
 
 
 class DescribeBlindBoxTests(unittest.TestCase):

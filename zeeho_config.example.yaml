@@ -24,6 +24,9 @@ runtime:
   timeout_seconds: 15
   use_proxy: false
   notify: true
+  # 每次运行在签到前模拟 App 进入前台，保持当前会话；关闭填 false。
+  # 保活失败不阻断签到和每日任务；建议配合青龙每日定时执行。
+  session_keepalive: true
   # 签到盲盒：服务端 signCount 达到 30 时自动领取；关闭填 false。
   blind_box: true
   # 每日任务（发帖→喜欢→分享→删帖，前 3 步各 +1 积分，删帖为清理）

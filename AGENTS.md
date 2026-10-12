@@ -19,7 +19,7 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
 |---|---|---|
 | `modules/config.py` | 配置读取/校验/原子写回 | 无外部请求；`Settings`/`Account` 是 frozen 值对象 |
 | `modules/zeeho.py` | 签名与请求 | H5 签到 + App 域(tapi)每日任务都在这里；`ZeehoClient` 是薄的注入式 IO 适配器；纯函数都在模块顶层 |
-| `modules/app.py` | 编排：逐账号 `sign_in` → `claim_blind_box` → `daily_tasks` → `fetch_score`（领取/任务后重查余额）→ 汇总（连签/可用积分合计）→ 通知 | **全部展示文案都在这里**：`describe_signin` / `describe_blind_box` / `describe_task_step` / `describe_daily_result` / `describe_available_score` / `describe_total_score` / `final_score` / `account_lines` |
+| `modules/app.py` | 编排：逐账号 `keep_session_active` → `sign_in` → `claim_blind_box` → `daily_tasks` → `fetch_score`（领取/任务后重查余额）→ 汇总（连签/可用积分合计）→ 通知 | **全部展示文案都在这里**：`describe_session_keepalive` / `describe_signin` / `describe_blind_box` / `describe_task_step` / `describe_daily_result` / `describe_available_score` / `describe_total_score` / `final_score` / `account_lines` |
 | `modules/notification.py` | 青龙原生 `notify.py` 的窄适配 | 本地缺失时打印跳过，不要加推送依赖 |
 
 结果对象只描述事实、不带文案，渲染一律在 `app.py`：
@@ -48,8 +48,9 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
 一切依赖从参数进。副作用收口在两侧：
 
 - `ZeehoClient` 通过构造注入 `session` / `clock_ms` / `log`（测试可全部替身，线上默认见
-  `__init__`）；请求只发生在 `sign_in` / `claim_blind_box` / `daily_tasks` 生命周期 + 收尾的只读
-  `fetch_score`（余额）里，`sign_in` 与 `daily_tasks` 都遵循「预检 → 动作 → 复核」的
+  `__init__`）；请求收口在 `keep_session_active` / `sign_in` / `claim_blind_box` /
+  `daily_tasks` 生命周期 + 收尾的只读 `fetch_score`（余额）里，`sign_in` 与 `daily_tasks`
+  都遵循「预检 → 动作 → 复核」的
   幂等模式（签到看 `signStatue`；每日任务看服务端进度+自己的帖子）。
 - `config.py` 允许的副作用只有「解码后原子写回配置文件」与提示打印，其余只读。
 
@@ -96,6 +97,14 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
 - 签到 `POST /cfmotoservermine/signin` 的响应 `data.integralScore` 就是本次得分（抓包实测），
   `zeeho.signin_payload_points` 把它当兜底：明细复核失败时也能报告积分。
 - `Zeeho-User-Agent` 中间的 UUID 每次请求都变，但服务端不校验，配置里写死即可。
+
+## 会话保活约定（动 `keep_session_active` 必读）
+
+- 保活是辅助操作：失败只进入日志/通知，不阻断后续任务，也不计入账号成功统计。
+  `SessionKeepaliveResult.auth_expired` 只根据 HTTP 401/403 设置，先判断 HTTP 再解析 JSON；
+  业务 `40000`、超时或令牌标称有效期均不能用来判定失效。
+- 空体 POST 的签名数据为空串；仅 HTTP 200 + `10000` 成功，`repeatedly_operation`
+  不当作成功。本次不重试，不回显响应体或异常原文；接口及配置说明见 README「会话保活」。
 
 ## 盲盒领取约定（动 `claim_blind_box` 必读）
 

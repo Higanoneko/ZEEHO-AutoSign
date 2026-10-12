@@ -8,6 +8,29 @@ from modules.config import ConfigError, CONFIG_TEMPLATE, load_settings
 
 
 class ConfigTests(unittest.TestCase):
+    def test_session_keepalive_switch(self):
+        content = """
+app:
+  app_id: test-app
+  app_secret: test-secret
+  user_agent: browser-agent
+  zeeho_user_agent: app-agent
+runtime:
+  session_keepalive: {switch}
+accounts:
+  - user_id: "1"
+    authorization: test-token
+"""
+        for switch, expected in [("true", True), ("false", False), ("'off'", False), ("'yes'", True), ("invalid", None)]:
+            with self.subTest(switch=switch), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "zeeho_config.yaml"
+                path.write_text(content.format(switch=switch), encoding="utf-8")
+                if expected is None:
+                    with self.assertRaisesRegex(ConfigError, "runtime.session_keepalive"):
+                        load_settings(path)
+                else:
+                    self.assertEqual(load_settings(path).session_keepalive, expected)
+
     def test_blind_box_switch_parses_values_and_rejects_invalid_input(self):
         content = """
 app:
@@ -60,6 +83,7 @@ accounts:
         self.assertEqual(settings.timeout, 9)
         self.assertTrue(settings.use_proxy)
         self.assertFalse(settings.notify)
+        self.assertTrue(settings.session_keepalive)
 
     def test_creates_template_when_config_is_missing(self):
         with tempfile.TemporaryDirectory() as directory:

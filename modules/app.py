@@ -15,6 +15,7 @@ from .zeeho import (
     STEP_SHARE,
     DailyTaskResult,
     BlindBoxResult,
+    SessionKeepaliveResult,
     SignInResult,
     TaskStep,
     ZeehoClient,
@@ -28,6 +29,17 @@ _STEP_LABELS = {
     STEP_LIKE: "喜欢",
     STEP_SHARE: "分享",
 }
+
+
+def describe_session_keepalive(result: Optional[SessionKeepaliveResult]) -> str:
+    """保活为辅助操作，失败只提示，不阻断签到或每日任务。"""
+    if result is None:
+        return "ℹ️ 已关闭（runtime.session_keepalive=false）"
+    if result.ok:
+        return "✅ 会话保活成功"
+    if result.auth_expired:
+        return "⚠️ 会话保活被拒绝：{}，请重新抓包更新 authorization".format(result.error)
+    return "⚠️ 会话保活失败：{}，继续执行签到和任务".format(result.error or "未知原因")
 
 
 def describe_signin(result: SignInResult) -> str:
@@ -132,9 +144,13 @@ def account_lines(
     signin: SignInResult,
     daily: Optional[DailyTaskResult],
     blind: Optional[BlindBoxResult] = None,
+    keepalive: Optional[SessionKeepaliveResult] = None,
 ) -> List[str]:
-    """单个账号的报告块：标题 + 签到段 + 盲盒段 + 任务段。"""
-    lines = ["[{}] {}：".format(index, name), "签到：", describe_signin(signin)]
+    """单个账号的报告块：标题 + 可选会话段 + 签到段 + 盲盒段 + 任务段。"""
+    lines = ["[{}] {}：".format(index, name)]
+    if keepalive is not None:
+        lines.extend(["会话：", describe_session_keepalive(keepalive)])
+    lines.extend(["签到：", describe_signin(signin)])
     lines.extend(["盲盒：", describe_blind_box(blind, signin.ok)])
     lines.append("任务：")
     lines.extend(describe_daily_result(daily))
@@ -146,21 +162,25 @@ def format_results(
     signins: Iterable[SignInResult],
     dailies: Iterable[Optional[DailyTaskResult]],
     blinds: Optional[Iterable[Optional[BlindBoxResult]]] = None,
+    keepalives: Optional[Iterable[Optional[SessionKeepaliveResult]]] = None,
 ) -> Tuple[str, bool]:
     """汇总全部账号结果，返回 (推送文案, 是否全部成功)。"""
     name_list = list(names)
     signin_list = list(signins)
     daily_list = list(dailies)
     blind_list = list(blinds) if blinds is not None else [None] * len(signin_list)
+    keepalive_list = (
+        list(keepalives) if keepalives is not None else [None] * len(signin_list)
+    )
     success_count = 0
     lines: List[str] = []
-    for index, (name, signin, daily, blind) in enumerate(
-        zip(name_list, signin_list, daily_list, blind_list), 1
+    for index, (name, signin, daily, blind, keepalive) in enumerate(
+        zip(name_list, signin_list, daily_list, blind_list, keepalive_list), 1
     ):
         success_count += int(
             signin.ok and (blind is None or blind.ok) and (daily is None or daily.ok)
         )
-        lines.extend(account_lines(index, name, signin, daily, blind))
+        lines.extend(account_lines(index, name, signin, daily, blind, keepalive))
     content = "\n".join(
         [
             "共{}个账号，成功{}个，失败{}个".format(
@@ -193,8 +213,13 @@ def run() -> int:
     signins: List[SignInResult] = []
     dailies: List[Optional[DailyTaskResult]] = []
     blinds: List[Optional[BlindBoxResult]] = []
+    keepalives: List[Optional[SessionKeepaliveResult]] = []
     for index, account in enumerate(settings.accounts, 1):
         print("\n—— 账号 {}：{} ——".format(index, account.name))
+        keepalive = (
+            client.keep_session_active(account) if settings.session_keepalive else None
+        )
+        print("[会话] " + describe_session_keepalive(keepalive))
         signin = client.sign_in(account)
         print("[签到] " + describe_signin(signin))
         blind = (
@@ -217,8 +242,9 @@ def run() -> int:
         signins.append(signin)
         dailies.append(daily)
         blinds.append(blind)
+        keepalives.append(keepalive)
 
-    content, all_ok = format_results(names, signins, dailies, blinds)
+    content, all_ok = format_results(names, signins, dailies, blinds, keepalives)
     print("\n" + content)
     if settings.notify:
         send_notification(TITLE, content)

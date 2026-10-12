@@ -1,6 +1,7 @@
 import hashlib
 import json
 import unittest
+from dataclasses import replace
 from datetime import date as RealDate
 from unittest import mock
 from unittest.mock import Mock
@@ -17,6 +18,8 @@ from modules.zeeho import (
     STEP_POST,
     STEP_SHARE,
     TAPI_SIGNIN_COUNT_PATH,
+    TAPI_BASE,
+    TAPI_KEEPALIVE_PATH,
     ZeehoClient,
     TAPI_ADJUST_SHARE_PATH,
     TAPI_CREATE_ARTICLE_PATH,
@@ -36,6 +39,7 @@ from modules.zeeho import (
     signin_count_state,
     signin_payload_points,
     stage_error_detail,
+    session_keepalive_result,
     task_post_content,
 )
 
@@ -92,6 +96,108 @@ def count_response(count, signed_today):
             "data": {"count": count, "signStatus": 1 if signed_today else 0},
         },
     )
+
+
+class SessionKeepaliveTests(unittest.TestCase):
+    account = Account("1", "Bearer test-token", "test")
+
+    def test_empty_post_uses_app_credentials_and_fresh_signature(self):
+        session = Mock()
+        session.post.return_value = response(200, {"code": "10000"})
+        settings = replace(make_settings(), tapi_app_id="native-app", tapi_app_secret="native-secret")
+        client = ZeehoClient(settings, session=session, clock_ms=Mock(side_effect=[123, 456]))
+
+        self.assertTrue(client.keep_session_active(self.account).ok)
+        self.assertTrue(client.keep_session_active(self.account).ok)
+        nonces = []
+        for call, timestamp in zip(session.post.call_args_list, [123, 456]):
+            self.assertEqual(call.args, (TAPI_BASE + TAPI_KEEPALIVE_PATH,))
+            self.assertEqual(call.kwargs["data"], b"")
+            self.assertEqual(call.kwargs["timeout"], settings.timeout)
+            headers = call.kwargs["headers"]
+            self.assertEqual(headers["Authorization"], self.account.authorization)
+            self.assertEqual(headers["Content-Length"], "0")
+            self.assertIn("application/json", headers["Content-Type"])
+            self.assertEqual(headers["User-Agent"], "okhttp/4.9.2")
+            self.assertEqual(headers["Accept"], "*/*")
+            self.assertNotIn("Cookie", headers)
+            self.assertNotIn("user_id", headers)
+            param = headers["Cfmoto-X-Param"]
+            self.assertTrue(param.startswith("appId=native-app&nonce="))
+            self.assertTrue(param.endswith("&timestamp={}".format(timestamp)))
+            nonce = param.split("nonce=", 1)[1].split("&", 1)[0]
+            nonces.append(nonce)
+            self.assertEqual(headers["Cfmoto-X-Sign"], create_signature(
+                "native-app", "native-secret", data="", timestamp_ms=timestamp, nonce=nonce
+            )["Cfmoto-X-Sign"])
+        self.assertNotEqual(*nonces)
+        session.request.assert_not_called()
+        self.assertFalse(session.trust_env)
+
+    def test_falls_back_to_h5_credentials(self):
+        session = Mock()
+        session.post.return_value = response(200, {"code": 10000})
+        client = ZeehoClient(make_settings(), session=session, clock_ms=lambda: 123)
+        self.assertTrue(client.keep_session_active(self.account).ok)
+        self.assertTrue(session.post.call_args.kwargs["headers"]["Cfmoto-X-Param"].startswith(
+            "appId=test-app&"
+        ))
+
+    def test_only_http_401_and_403_indicate_rejected_authentication(self):
+        for status, payload, ok, expired in [
+            (200, {"code": 10000}, True, False),
+            (200, {"code": "10000", "data": False}, True, False),
+            (200, {"code": "repeatedly_operation"}, False, False),
+            (200, {"code": "40000"}, False, False),
+            (200, {}, False, False),
+            (200, [], False, False),
+            (200, None, False, False),
+            (401, None, False, True),
+            (403, None, False, True),
+            (430, {"code": "30121"}, False, False),
+            (500, {"code": "10000"}, False, False),
+            (204, None, False, False),
+        ]:
+            with self.subTest(status=status, payload=payload):
+                result = session_keepalive_result(status, payload)
+                self.assertEqual(result.ok, ok)
+                self.assertEqual(result.auth_expired, expired)
+
+    def test_rejected_authentication_is_detected_even_without_json(self):
+        for status in [401, 403]:
+            with self.subTest(status=status):
+                session = Mock()
+                session.post.return_value.status_code = status
+                session.post.return_value.json.side_effect = ValueError("not JSON")
+                result = ZeehoClient(make_settings(), session=session).keep_session_active(self.account)
+                self.assertTrue(result.auth_expired)
+                self.assertEqual(result.error, "HTTP {}".format(status))
+                session.post.return_value.json.assert_not_called()
+
+    def test_network_and_parse_errors_do_not_retry_or_expose_credentials(self):
+        for failure in [requests.Timeout("Bearer test-token"), requests.ConnectionError("token=test-token")]:
+            with self.subTest(failure=type(failure).__name__):
+                session = Mock()
+                session.post.side_effect = failure
+                result = ZeehoClient(make_settings(), session=session).keep_session_active(self.account)
+                self.assertFalse(result.ok)
+                self.assertFalse(result.auth_expired)
+                self.assertEqual(result.error, type(failure).__name__)
+                session.post.assert_called_once()
+        session = Mock()
+        session.post.return_value = response(200, {})
+        session.post.return_value._content = b'Bearer test-token'
+        result = ZeehoClient(make_settings(), session=session).keep_session_active(self.account)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "响应不是有效 JSON")
+        session.post.assert_called_once()
+
+    def test_business_failure_does_not_echo_server_message_or_token_fields(self):
+        result = session_keepalive_result(200, {
+            "code": "40000", "message": "Bearer test-token", "token": "test-token"
+        })
+        self.assertEqual(result.error, "code=40000")
+        self.assertFalse(result.auth_expired)
 
 
 class BlindBoxTests(unittest.TestCase):

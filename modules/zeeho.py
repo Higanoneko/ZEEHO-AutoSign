@@ -27,6 +27,7 @@ BLIND_BOX_THRESHOLD = 30
 
 # ---- 每日任务（发帖→喜欢→分享→删帖）：原生 App 域 tapi 接口 ----
 TAPI_BASE = "https://tapi.zeehoev.com"
+TAPI_KEEPALIVE_PATH = "/v1.0/app/cfmotoserverapp/app/scoreguiding/openApplication"
 TAPI_MY_ARTICLES_PATH = (
     "/v1.0/social/cfmotoserversocial/community/mineArticleInfo"
 )
@@ -61,6 +62,15 @@ TASK_POST_TYPE = "1"
 # 自动打卡帖正文的识别形状（只有长这样的本人帖子才会被清理/复用，
 # 普通用户帖即便内容相近也不会被误删）
 _TASK_STYLE_RE = re.compile(r"^\d{1,2}月\d{1,2}日打卡$")
+
+
+@dataclass(frozen=True)
+class SessionKeepaliveResult:
+    """会话保活结果；只有服务器返回 401/403 时标记登录态被拒绝。"""
+
+    ok: bool
+    error: str = ""
+    auth_expired: bool = False
 
 
 @dataclass(frozen=True)
@@ -426,6 +436,21 @@ def blind_box_reward(payload: Mapping[str, Any]) -> Tuple[int, str]:
     return points, str(data.get("prizesName") or "")
 
 
+def session_keepalive_result(status: int, payload: Any) -> SessionKeepaliveResult:
+    """按实际响应判定保活结果；不按令牌的标称有效期推断失效。"""
+    if status != 200:
+        return SessionKeepaliveResult(
+            False, error="HTTP {}".format(status), auth_expired=status in {401, 403}
+        )
+    if not isinstance(payload, Mapping):
+        return SessionKeepaliveResult(False, error="响应 JSON 顶层不是对象")
+    code = str(payload.get("code") or "")
+    if code != "10000":
+        # 不回显响应体/服务端 message，避免登录态出现在日志和通知中。
+        return SessionKeepaliveResult(False, error="code={}".format(code or "<空>"))
+    return SessionKeepaliveResult(True)
+
+
 class ZeehoClient:
     """一个账号一次签到所需的完整请求 interface。"""
 
@@ -722,6 +747,28 @@ class ZeehoClient:
             )
             return payload, detail
         return payload, ""
+
+    def keep_session_active(self, account: Account) -> SessionKeepaliveResult:
+        """模拟 App 前台保活，发送一次空体 POST；失败交给下次任务再尝试。"""
+        headers = self._tapi_headers(account, json_body=True, empty_body=True)
+        headers.update({"Accept": "*/*", "User-Agent": "okhttp/4.9.2"})
+        try:
+            response = self.session.post(
+                TAPI_BASE + TAPI_KEEPALIVE_PATH,
+                headers=headers,
+                data=b"",
+                timeout=self.settings.timeout,
+            )
+        except requests.RequestException as exc:
+            return SessionKeepaliveResult(False, error=type(exc).__name__)
+        # HTTP 状态优先于 JSON 解析，包括返回 HTML/空体的 401/403。
+        if response.status_code != 200:
+            return session_keepalive_result(response.status_code, None)
+        try:
+            payload = response.json()
+        except (ValueError, TypeError):
+            return SessionKeepaliveResult(False, error="响应不是有效 JSON")
+        return session_keepalive_result(response.status_code, payload)
 
     def _my_articles(self, account: Account, stage: str) -> Tuple[Optional[list], str]:
         """查询自己的帖子列表（mineArticleInfo）。失败返回 (None, error)。"""

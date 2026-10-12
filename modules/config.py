@@ -47,6 +47,8 @@ runtime:
   timeout_seconds: 15
   use_proxy: false
   notify: true
+  # 每次运行先模拟 App 进入前台，保持当前登录会话
+  session_keepalive: true
   # 签到盲盒：服务端 signCount 达到 30 时自动领取
   blind_box: true
   # 每日任务（发帖→喜欢→分享→删帖，前 3 步各 +1 积分，删帖为清理）
@@ -120,6 +122,7 @@ class Settings:
     daily_tasks: bool = True
     daily_post_content: str = ""
     blind_box: bool = True
+    session_keepalive: bool = True
 
 
 def get_config_path() -> Path:
@@ -370,4 +373,7 @@ def load_settings(config_path: Optional[Path] = None) -> Settings:
         ),
         daily_post_content=str(runtime.get("daily_post_content") or "").strip(),
         blind_box=_config_bool(runtime.get("blind_box"), "runtime.blind_box", True),
+        session_keepalive=_config_bool(
+            runtime.get("session_keepalive"), "runtime.session_keepalive", True
+        ),
     )
