@@ -85,7 +85,7 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
   一个字段；抓包教程里不必再让用户复制那串 Cookie。
 - `signStatue`：`3`/`5` = 已签（今天的 `integralScore` 即本次得分）；`4` = 过去未签；`2` = 未来占位。
 - 可用积分来自 App 域 `tapi.zeehoev.com/v1.0/mine/cfmotoservermine/setting/{user_id}` 的
-  `data.score`（`zeeho.SCORE_ENDPOINT`），与 H5 同一对密钥即可；只读，失败只跳过展示、不阻断签到。
+  `data.score`（`zeeho.SCORE_ENDPOINT`）；只读，失败只跳过展示、不阻断签到。
   **余额只按事实取，不做推算**：任务行里的「积分+X」来自规则表 `integralNumber`，与余额无关。
   `sign_in` 里那次查询早于盲盒和每日任务，单看它会少掉本次奖励；所以每个账号在任务链
   跑完后由 `app.run()` 再查一次，报告末尾那行是这些最终余额的合计
@@ -97,6 +97,15 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
 - 签到 `POST /cfmotoservermine/signin` 的响应 `data.integralScore` 就是本次得分（抓包实测），
   `zeeho.signin_payload_points` 把它当兜底：明细复核失败时也能报告积分。
 - `Zeeho-User-Agent` 中间的 UUID 每次请求都变，但服务端不校验，配置里写死即可。
+
+## SMART 签到约定（动 `_sign_in_smart` 必读）
+
+- SMART 请求仍走 H5 域，但使用原生 App 密钥，GET/POST 都把 `server_name=SMART`
+  签入 data；密钥选择按接口方案决定，不能仅按域名决定。
+- `smart_signin_state` 从 `lastTime/continueDays` 解析事实，畸形状态中止动作。
+  SMART 的 `10000/repeatedly_operation` 均须 GET 复核今日已签才算成功；POST 失败
+  或复核失败后本次不重试、不切换后端。盲盒资格仍只认 H5 `signCount`。
+- 余额查询与其他 App 域请求统一经 `_tapi_headers`，优先原生 App 密钥并注入时钟。
 
 ## 会话保活约定（动 `keep_session_active` 必读）
 

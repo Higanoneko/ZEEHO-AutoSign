@@ -8,6 +8,38 @@ from modules.config import ConfigError, CONFIG_TEMPLATE, load_settings
 
 
 class ConfigTests(unittest.TestCase):
+    def test_signin_mode_validation_and_native_credentials_requirement(self):
+        content = """
+app:
+  app_id: test-app
+  app_secret: test-secret
+  tapi_app_id: {app_id}
+  tapi_app_secret: {secret}
+  user_agent: browser-agent
+  zeeho_user_agent: app-agent
+runtime:
+  signin_mode: {mode}
+accounts:
+  - user_id: "1"
+    authorization: test-token
+"""
+        for mode, native, expected in [
+            ("h5", False, "h5"), ("smart", True, "smart"),
+            ("SMART", True, "smart"), ("smart", False, None),
+            ("invalid", True, None), ("false", True, None),
+        ]:
+            with self.subTest(mode=mode, native=native), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "zeeho_config.yaml"
+                path.write_text(content.format(
+                    app_id="native-app" if native else "''",
+                    secret="native-secret" if native else "''", mode=mode,
+                ), encoding="utf-8")
+                if expected is None:
+                    with self.assertRaises(ConfigError):
+                        load_settings(path)
+                else:
+                    self.assertEqual(load_settings(path).signin_mode, expected)
+
     def test_session_keepalive_switch(self):
         content = """
 app:
@@ -84,6 +116,7 @@ accounts:
         self.assertTrue(settings.use_proxy)
         self.assertFalse(settings.notify)
         self.assertTrue(settings.session_keepalive)
+        self.assertEqual(settings.signin_mode, "h5")
 
     def test_creates_template_when_config_is_missing(self):
         with tempfile.TemporaryDirectory() as directory:

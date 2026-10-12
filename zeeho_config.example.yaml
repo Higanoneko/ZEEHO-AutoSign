@@ -8,10 +8,10 @@ app:
   # 同上，取 appSecret 对应的 40 组 16 位二进制空格串，或解码后的 40 位十六进制；
   # 密钥会被服务端轮换，报 HTTP 430 code=30121 时按 README 重新提取。
   app_secret: ""
-  # 原生 App 域（tapi.zeehoev.com 社区/每日任务接口）专用密钥对，可空：
-  # 留空回退用上面的 H5 密钥签名（现有积分余额接口已验证同域可用）。
+  # 原生 App 密钥对，供 App 域接口与 SMART 签到使用：
+  # h5 模式下可空（App 域回退 H5 密钥）；smart 模式必须成对填写。
   # 抓包里 App 请求的 Cfmoto-X-Param 内 appId 为 S7qPWPU1（App 内置另一对密钥）；
-  # 仅当上述回退报 430/30121 时才需要从 App JS 提取填这里。
+  # appId 可从 App 请求头获取；对应 appSecret 需从 App 提取，不在请求头里。
   tapi_app_id: ""
   tapi_app_secret: ""
   base_url: "https://h5.zeehoev.com"
@@ -21,6 +21,9 @@ app:
   zeeho_user_agent: ""
 
 runtime:
+  # 签到方案：h5（默认）或 smart（需填写上面的原生 App 密钥对）。
+  # smart 使用 /signin?server_name=SMART 的 GET → POST → GET 链路。
+  signin_mode: h5
   timeout_seconds: 15
   use_proxy: false
   notify: true

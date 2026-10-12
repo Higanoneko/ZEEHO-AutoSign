@@ -48,7 +48,7 @@ pip3 install -r requirements.txt
 app:
   app_id: ""
   app_secret: ""
-  # 原生 App 域（tapi.zeehoev.com 社区/每日任务）专用密钥对，可空（留空回退用 H5 密钥）
+  # 原生 App 密钥对：供 App 域与 SMART 签到使用，smart 模式必填
   tapi_app_id: ""
   tapi_app_secret: ""
   base_url: "https://h5.zeehoev.com"
@@ -56,6 +56,8 @@ app:
   zeeho_user_agent: ""
 
 runtime:
+  # 签到方案：h5（默认）或 smart（需填写原生 App 密钥对）
+  signin_mode: h5
   timeout_seconds: 15
   use_proxy: false
   notify: true
@@ -231,6 +233,44 @@ HTTP 401/403 时才提示重新抓包更新 `authorization`。此接口用于保
 
 ## 签到流程与状态确认
 
+### SMART 签到方案
+
+支持参考 `ZEEHO-QL-Js` 的 SMART 链路。启用时配置：
+
+```yaml
+app:
+  tapi_app_id: "原生 App 的 appId"
+  tapi_app_secret: "与之配对的原生 App appSecret"
+runtime:
+  signin_mode: smart
+```
+
+以上是需要修改的字段，其余现有配置保留。`app_id/app_secret` 继续用于 H5 明细及
+盲盒接口；`tapi_app_id/tapi_app_secret` 用于 SMART 签到、会话保活、每日任务及余额查询。
+原生 App 的 appId 可从请求头 `Cfmoto-X-Param` 获取，对应 appSecret 需要从 App 提取，
+不会出现在网络请求头中。两者必须成对填写；smart 模式缺少密钥时直接报配置错误。
+
+SMART 签到仍请求 `h5.zeehoev.com`，按以下顺序执行：
+
+1. `GET /cfmotoservermine/signin?server_name=SMART`：读取 `lastTime/continueDays`。
+   `lastTime` 属于今天时跳过签到；缺失或畸形状态会报错，不当作未签。
+2. 确认未签后，向同一地址发送一次空体 POST（`Content-Length: 0`）。GET/POST
+   的签名数据均包含 `server_name=SMART`，时间戳与 nonce 每次现算，使用原生 App 密钥。
+3. 再次 GET 同一地址，确认 `lastTime` 属于今天，连签天数取复核响应的 `continueDays`。
+   即使 POST 返回 `10000` 或 `repeatedly_operation`，仍需复核成功才判定签到成功。
+
+账号 `user_id` 继续使用现有配置。签到积分只取 POST 响应的 `integralScore`；预检已签时
+该状态接口没有当次积分，报告不推算奖励。超时、报错或复核失败时，本次不会重试 POST，
+也不会切换到 H5 方案补发。下一次运行重新读取服务端状态。
+
+盲盒仍按 H5 明细的 `signCount` 判断资格，不使用 SMART 连签天数替代。若 H5 明细仍被
+拒绝，可先设置 `runtime.blind_box: false` 验证 SMART 签到。SMART 对当前账号的可用性
+需要填好原生密钥后实测；`30125` 尚无已确认的原因，不能仅凭该码判定密钥过期。
+
+`runtime.signin_mode` 默认是 `h5`，旧配置不写这个字段时行为保持不变。
+
+### H5 签到方案
+
 每个账号依次执行（`modules/zeeho.py` 的 `sign_in`）：
 
 0. **App 端状态查询**：`GET tapi.zeehoev.com/v1.0/mine/cfmotoservermine/signin/count`
@@ -294,7 +334,7 @@ HTTP 401/403 时才提示重新抓包更新 `authorization`。此接口用于保
 - **可用积分**：报告最后一行是所有账号可用积分的合计。每个账号的余额都在**整条任务链
   跑完后**重新查一次（只读查询 App 端用户信息接口
   `tapi.zeehoev.com/v1.0/mine/cfmotoservermine/setting/<user_id>` 的 `data.score`，
-  签名密钥与 H5 同一套，无需额外配置），所以合计里已经包含本次签到、盲盒与三项任务赚到的
+  签名优先用原生 App 密钥，未配置时回退 H5 密钥），所以合计里已经包含本次签到、盲盒与三项任务赚到的
   积分；日志里对应每个账号的 `[余额] 可用积分：N` 行。
   - 余额**不做推算**：任务行显示的「积分+X」只是规则表里的单次奖励，不参与余额计算。
   - 这次重查失败时（不影响签到与任务结果）退回签到阶段查到的那次余额；两次都没取到

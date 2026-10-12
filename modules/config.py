@@ -35,8 +35,8 @@ CONFIG_TEMPLATE = """# ZEEHO 自动签到配置文件
 app:
   app_id: ""
   app_secret: ""
-  # 原生 App 域（tapi.zeehoev.com 社区/每日任务接口）专用密钥对，可空：
-  # 留空时回退用上面同一套 H5 密钥签名（现有积分接口已验证同域可用）。
+  # 原生 App 密钥对，供 App 域接口与 SMART 签到使用：
+  # h5 模式下可空（App 域回退 H5 密钥）；smart 模式必须成对填写。
   tapi_app_id: ""
   tapi_app_secret: ""
   base_url: "https://h5.zeehoev.com"
@@ -44,6 +44,8 @@ app:
   zeeho_user_agent: ""
 
 runtime:
+  # 签到方案：h5（默认）或 smart（需填写原生 App 密钥对）
+  signin_mode: h5
   timeout_seconds: 15
   use_proxy: false
   notify: true
@@ -123,6 +125,7 @@ class Settings:
     daily_post_content: str = ""
     blind_box: bool = True
     session_keepalive: bool = True
+    signin_mode: str = "h5"
 
 
 def get_config_path() -> Path:
@@ -321,6 +324,11 @@ def load_settings(config_path: Optional[Path] = None) -> Settings:
     tapi_app_secret, tapi_secret_was_decoded = decode_app_secret(
         raw_tapi_app_secret
     )
+    signin_mode = str(runtime.get("signin_mode", "h5")).strip().lower()
+    if signin_mode not in {"h5", "smart"}:
+        raise ConfigError("runtime.signin_mode 必须是 h5 或 smart")
+    if signin_mode == "smart" and not (tapi_app_id and tapi_app_secret):
+        raise ConfigError("SMART 签到需填写 app.tapi_app_id 与 app.tapi_app_secret")
     base_url = str(app.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
     user_agent = str(app.get("user_agent") or "").strip()
     zeeho_user_agent = str(app.get("zeeho_user_agent") or "").strip()
@@ -376,4 +384,5 @@ def load_settings(config_path: Optional[Path] = None) -> Settings:
         session_keepalive=_config_bool(
             runtime.get("session_keepalive"), "runtime.session_keepalive", True
         ),
+        signin_mode=signin_mode,
     )

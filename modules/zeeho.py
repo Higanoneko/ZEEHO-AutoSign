@@ -24,6 +24,8 @@ SCORE_ENDPOINT = "https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/setting/{u
 TAPI_SIGNIN_COUNT_PATH = "/v1.0/mine/cfmotoservermine/signin/count"
 BLIND_BOX_PATH = "/cfmotoservermine/signin/supplementPrize"
 BLIND_BOX_THRESHOLD = 30
+SMART_SIGNIN_PATH = "/cfmotoservermine/signin"
+SMART_SIGNING_DATA = "server_name=SMART"
 
 # ---- 每日任务（发帖→喜欢→分享→删帖）：原生 App 域 tapi 接口 ----
 TAPI_BASE = "https://tapi.zeehoev.com"
@@ -436,6 +438,38 @@ def blind_box_reward(payload: Mapping[str, Any]) -> Tuple[int, str]:
     return points, str(data.get("prizesName") or "")
 
 
+def smart_signin_state(
+    payload: Optional[Mapping[str, Any]], today: str
+) -> Optional[SigninCountState]:
+    """SMART 状态来自 lastTime / continueDays；缺失或畸形时不授权签到动作。"""
+    data = payload.get("data") if isinstance(payload, Mapping) else None
+    if not isinstance(data, Mapping) or "lastTime" not in data:
+        return None
+    raw_count = data.get("continueDays")
+    if isinstance(raw_count, bool) or not isinstance(raw_count, (int, str)):
+        return None
+    try:
+        count = int(raw_count)
+    except ValueError:
+        return None
+    if count < 0:
+        return None
+    last_time = data.get("lastTime")
+    if last_time in (None, ""):
+        return SigninCountState(count, False) if count == 0 else None
+    if not isinstance(last_time, str):
+        return None
+    last_day = last_time[:10]
+    try:
+        if date.fromisoformat(last_day).isoformat() != last_day:
+            return None
+    except ValueError:
+        return None
+    if last_day > today:
+        return None
+    return SigninCountState(count, last_day == today)
+
+
 def session_keepalive_result(status: int, payload: Any) -> SessionKeepaliveResult:
     """按实际响应判定保活结果；不按令牌的标称有效期推断失效。"""
     if status != 200:
@@ -560,20 +594,12 @@ class ZeehoClient:
         return None
 
     def fetch_score(self, account: Account) -> Optional[int]:
-        """查询账号可用积分余额（App 端用户信息接口，同一套签名凭据）。
+        """查询账号可用积分余额（App 端用户信息接口，优先原生 App 密钥）。
 
         只读接口，失败不影响签到结果，返回 None 表示未取到。
         """
-        headers = {
-            "Accept": "application/json, text/plain, */*",
-            "Authorization": account.authorization,
-            "Content-Type": "application/json;charset=UTF-8",
-            "interfaceversion": "2",
-            "user_id": account.user_id,
-        }
-        headers.update(
-            create_signature(self.settings.app_id, self.settings.app_secret, data="")
-        )
+        headers = self._tapi_headers(account, json_body=True)
+        headers.update({"interfaceversion": "2", "user_id": account.user_id})
         try:
             response = self.session.get(
                 SCORE_ENDPOINT.format(user_id=account.user_id),
@@ -1111,6 +1137,8 @@ class ZeehoClient:
         )
 
     def sign_in(self, account: Account) -> SignInResult:
+        if self.settings.signin_mode == "smart":
+            return self._sign_in_smart(account)
         today = date.today().isoformat()
         month = today[:7]
 
@@ -1250,4 +1278,75 @@ class ZeehoClient:
             gained_points=gained or posted_points,
             continue_days=streak,
             available_score=score,
+        )
+
+    def _smart_headers(self, account: Account, empty_body: bool = False) -> Dict[str, str]:
+        """SMART 仍走 H5 域，但使用原生 App 密钥并签入 server_name 查询串。"""
+        headers = self._tapi_headers(
+            account, signing_data=SMART_SIGNING_DATA, empty_body=empty_body
+        )
+        headers.update({"User-Agent": self.settings.user_agent, "user_id": account.user_id})
+        return headers
+
+    def _smart_state(
+        self, account: Account, today: str, stage: str
+    ) -> Tuple[Optional[SigninCountState], str]:
+        _, payload, error = self._request_json(
+            stage, "GET", SMART_SIGNIN_PATH, self._smart_headers(account),
+            params={"server_name": "SMART"},
+        )
+        if error:
+            return None, stage_error_detail(error, stage)
+        code = str((payload or {}).get("code") or "")
+        if code != "10000":
+            return None, "code={}".format(code or "<空>")
+        state = smart_signin_state(payload, today)
+        if state is None:
+            return None, "签到状态缺少有效的 lastTime / continueDays"
+        return state, ""
+
+    def _sign_in_smart(self, account: Account) -> SignInResult:
+        """SMART：只读预检 → 最多一次空体 POST → 只读复核；不切换后端重试。"""
+        if not (self.settings.tapi_app_id and self.settings.tapi_app_secret):
+            return SignInResult(account, False, False, "SMART 签到缺少原生 App 密钥对")
+        today = date.today().isoformat()
+        before, error = self._smart_state(account, today, "SMART 签到前查询")
+        if error:
+            return SignInResult(account, False, False, "状态查询失败：" + error)
+        if before.signed_today:
+            return SignInResult(
+                account, True, True, code="10000", continue_days=before.streak,
+                available_score=self.fetch_score(account),
+            )
+        _, payload, error = self._request_json(
+            "SMART 执行签到", "POST", SMART_SIGNIN_PATH,
+            self._smart_headers(account, empty_body=True),
+            params={"server_name": "SMART"}, data=b"",
+        )
+        if error:
+            return SignInResult(
+                account, False, False,
+                "执行签到失败：" + stage_error_detail(error, "SMART 执行签到"),
+            )
+        code = str((payload or {}).get("code") or "")
+        points = signin_payload_points(payload)
+        if code not in {"10000", "repeatedly_operation"}:
+            return SignInResult(
+                account, False, False,
+                "签到接口返回 code=" + (code or "<空>"), code,
+            )
+        after, error = self._smart_state(account, today, "SMART 签到后确认")
+        if error or not after.signed_today:
+            return SignInResult(
+                account, False, False,
+                "签到后未确认今日已签到：" + (error or "lastTime 不是今天"),
+                code=code, gained_points=points,
+            )
+        data = payload.get("data")
+        already = code == "repeatedly_operation" or (
+            isinstance(data, Mapping) and str(data.get("signInStatus")) == "1"
+        )
+        return SignInResult(
+            account, True, already, code=code, gained_points=points,
+            continue_days=after.streak, available_score=self.fetch_score(account),
         )
