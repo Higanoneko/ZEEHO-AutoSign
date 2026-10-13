@@ -231,7 +231,8 @@ POST https://tapi.zeehoev.com/v1.0/app/cfmotoserverapp/app/scoreguiding/openAppl
 ```
 
 请求使用当前 `authorization`，发送空请求体（`Content-Length: 0`），签名每次现算。
-密钥优先使用 `app.tapi_app_id/tapi_app_secret`，留空时沿用 H5 密钥。
+密钥优先使用 `app.tapi_app_id/tapi_app_secret`；留空且 H5 appId 为 `AiTXmBrm` 时，
+自动使用参考项目中已验证的原生 App 配对，其他旧配对保留 H5 回退。
 HTTP 200 且业务 `code=10000` 才记录保活成功。
 
 `runtime.session_keepalive` 默认开启，旧配置缺少该字段也会自动启用；设为 `false`
@@ -427,10 +428,15 @@ GET /cfmotoservermine/H5/signin/supplementPrize?supplementDate=YYYY-MM-DD
   分享或删除。
 
 > 说明：这些接口在原生 App 抓包里用 App 内置的密钥对签名（`appId=S7qPWPU1`），
-> 与 H5 的密钥对不同。当前版本建议成对填写 `app.tapi_app_id` / `app.tapi_app_secret`
-> （支持二进制串自动解码），供 App 连签状态、余额、保活和社区任务使用。未配置时保留
-> H5 密钥回退以兼容旧服务端，但新 H5 密钥用于 App 连签状态查询已实测被拒，原生 App
-> 配对可正常返回。H5 JS 提取工具输出的密钥应填 `app_id/app_secret`，不要混用。
+> 与 H5 的密钥对不同。显式填写的 `app.tapi_app_id` / `app.tapi_app_secret`（支持二进制
+> 解码）优先用于 App 连签状态、余额、保活和社区任务。它们留空且 H5 appId 为
+> `AiTXmBrm` 时，会自动使用已验证的内置原生 App 配对；其他旧配对仍保留 H5 回退，
+> 不额外探测或重试写操作。内置的是公共应用签名凭据，不含用户登录态；若原生密钥
+> 后续轮换，可用显式配置覆盖。H5 JS 提取工具的结果填 `app_id/app_secret`，不要混用。
+>
+> 社区与保活仍使用 `tapi.zeehoev.com/v1.0` 原路径，只有 H5 签到、明细、盲盒迁到
+> `/H5/signin`。只更新 H5 配对而把它用于 App 域时，保活和帖子查询已实测返回
+> `430/30125`；本兼容选择在请求前完成，不会因发帖报错而再发一次。
 >
 > App 请求会同时发送 `appid/nonce/timestamp/signature` 与 `Cfmoto-X-*`，所有签名头
 > 派生自同一次签名；`User-Agent/X-App-Info` 使用配置里的 `zeeho_user_agent`，保持

@@ -31,6 +31,11 @@ SMART_SIGNING_DATA = "server_name=SMART"
 
 # ---- 每日任务（发帖→喜欢→分享→删帖）：原生 App 域 tapi 接口 ----
 TAPI_BASE = "https://tapi.zeehoev.com"
+# 公共应用签名凭据来自官方 App 配对（Reference/ZEEHO），不包含任何账号登录态。
+# 新 H5 配对不能签名 App 域；显式配置优先，旧配对保留历史跨域兼容。
+_H5_ONLY_APP_IDS = frozenset({"AiTXmBrm"})
+_DEFAULT_TAPI_APP_ID = "S7qPWPU1"
+_DEFAULT_TAPI_APP_SECRET = "c5e0da7f4da28df805694ec3dd1fc6792e9df99d"
 TAPI_KEEPALIVE_PATH = "/v1.0/app/cfmotoserverapp/app/scoreguiding/openApplication"
 TAPI_MY_ARTICLES_PATH = (
     "/v1.0/social/cfmotoserversocial/community/mineArticleInfo"
@@ -178,6 +183,15 @@ def create_signature(
         "Cfmoto-X-Sign": signature,
         "Cfmoto-X-Sign-Type": "0",
     }
+
+
+def select_app_credentials(settings: Settings) -> Tuple[str, str]:
+    """按配对选择 App 域密钥，兼容只更新了 H5 密钥的旧配置。"""
+    if settings.tapi_app_id and settings.tapi_app_secret:
+        return settings.tapi_app_id, settings.tapi_app_secret
+    if settings.app_id in _H5_ONLY_APP_IDS:
+        return _DEFAULT_TAPI_APP_ID, _DEFAULT_TAPI_APP_SECRET
+    return settings.app_id, settings.app_secret
 
 
 def app_signature_headers(signature: Mapping[str, str]) -> Dict[str, str]:
@@ -699,10 +713,8 @@ class ZeehoClient:
         return payload, payload, ""
 
     def _app_credentials(self) -> Tuple[str, str]:
-        """App 域签名密钥对：配置了 tapi 专用密钥就用它，否则回退 H5 密钥。"""
-        if self.settings.tapi_app_id and self.settings.tapi_app_secret:
-            return self.settings.tapi_app_id, self.settings.tapi_app_secret
-        return self.settings.app_id, self.settings.app_secret
+        """App 域签名密钥选择集中在纯函数，保持每个请求使用同一完整配对。"""
+        return select_app_credentials(self.settings)
 
     def _tapi_headers(
         self,

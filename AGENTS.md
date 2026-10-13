@@ -150,9 +150,10 @@ Python 3，依赖仅 `requests` + `PyYAML`。真实账号凭据在 `zeeho_config
   发帖前先看 1023：App 端今天已发过帖就不再重复发。点赞前先看条目 `userLikeStatus`
   （已赞直接跳过，避免对同一帖子重复 POST 可能变成取消）。
 - 抓包里这些社区请求签名用的是 App 内置密钥（`appId=S7qPWPU1`），与 H5 的
-  `AiTXmBrm` 不同；`_app_credentials` 优先用 `app.tapi_app_id/tapi_app_secret`，
-  未配置时保留回退 H5 的兼容路径。当前原生签到状态查询已实测需独立 App 配对，
-  不要把 H5 前端提取结果当作原生 App 密钥。
+  `AiTXmBrm` 不同；纯函数 `select_app_credentials` 优先用显式 `tapi_app_id/tapi_app_secret`，
+  未配置且 H5 appId 属于 `_H5_ONLY_APP_IDS` 时用已验证的内置 App 配对，其他旧配置才
+  回退 H5。该选择在请求前完成；不得为换密钥或猜路径重发社区写操作。社区与保活
+  路径仍未迁移，不要把 H5 的 `/H5/` 前缀套到 App 接口。
 - 发帖正文由 `runtime.daily_post_content` 决定，留空按当天日期生成（`task_post_content`），
   改动默认正文模板 = 同时改 `_TASK_STYLE_RE` 与相关测试，别让两处失配。
 

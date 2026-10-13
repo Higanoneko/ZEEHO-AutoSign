@@ -37,6 +37,7 @@ from modules.zeeho import (
     count_previous_month_tail,
     count_streak,
     create_signature,
+    select_app_credentials,
     app_signature_headers,
     daily_task_rules,
     signin_count_state,
@@ -103,6 +104,22 @@ def count_response(count, signed_today):
 
 class SessionKeepaliveTests(unittest.TestCase):
     account = Account("1", "Bearer test-token", "test")
+
+    def test_new_h5_only_configuration_uses_native_pair_without_retry(self):
+        session = Mock()
+        def reply(url, **kwargs):
+            app_id = kwargs["headers"]["Cfmoto-X-Param"].split("&", 1)[0]
+            return response(200, {"code": "10000"}) if app_id == "appId=S7qPWPU1" else response(430, {"code": "30125"})
+        session.post.side_effect = reply
+        settings = replace(make_settings(), app_id="AiTXmBrm", app_secret="fake-new-h5-secret")
+        with mock.patch("modules.zeeho._DEFAULT_TAPI_APP_SECRET", "fake-native-secret"):
+            result = ZeehoClient(settings, session=session, clock_ms=lambda: 123).keep_session_active(self.account)
+        self.assertTrue(result.ok)
+        session.post.assert_called_once()
+        self.assertEqual(session.post.call_args.args, (TAPI_BASE + TAPI_KEEPALIVE_PATH,))
+        headers = session.post.call_args.kwargs["headers"]
+        raw = headers["Cfmoto-X-Param"] + "fake-native-secret"
+        self.assertEqual(headers["Cfmoto-X-Sign"], hashlib.md5(hashlib.sha1(raw.encode()).hexdigest().encode()).hexdigest())
 
     def test_empty_post_uses_app_credentials_and_fresh_signature(self):
         session = Mock()
@@ -322,6 +339,12 @@ class BlindBoxTests(unittest.TestCase):
 
 
 class SignatureTests(unittest.TestCase):
+    def test_explicit_native_pair_overrides_builtin_compatibility(self):
+        settings = replace(make_settings(), app_id="AiTXmBrm", tapi_app_id="custom-app", tapi_app_secret="custom-secret")
+        self.assertEqual(select_app_credentials(settings), ("custom-app", "custom-secret"))
+
+    def test_legacy_configuration_keeps_h5_pair(self):
+        self.assertEqual(select_app_credentials(make_settings()), ("test-app", "test-secret"))
     def test_app_redundant_headers_use_the_same_signature_parameters(self):
         signature = create_signature("native-app", "fake-secret", data="a=1{}", timestamp_ms=123, nonce="fixed-nonce")
         headers = app_signature_headers(signature)
@@ -816,8 +839,47 @@ def article_id(entry):
 
 
 class DailyTaskTests(unittest.TestCase):
+    def test_new_h5_only_config_uses_native_pair_for_the_entire_task_chain(self):
+        script = [
+            ok_payload([]),
+            ok_payload({"ps0003_01_002_VOList": progress_rows()}),
+            ok_payload(True),
+            ok_payload([task_article("test-post", self.content, self.today + " 12:00:00")]),
+            ok_payload(True), ok_payload(1), ok_payload(True), ok_payload(True),
+        ]
+        session, calls, remaining = queue_session(script)
+        normal_dispatch = session.request.side_effect
+
+        def dispatch(method, url, **kwargs):
+            if not kwargs["headers"]["Cfmoto-X-Param"].startswith("appId=S7qPWPU1&"):
+                return response(430, {"code": "30125", "message": "permit error"})
+            return normal_dispatch(method, url, **kwargs)
+
+        session.request.side_effect = dispatch
+        settings = replace(make_settings(), app_id="AiTXmBrm", app_secret="fake-h5-secret")
+        with mock.patch("modules.zeeho.date", FakeDate), mock.patch(
+            "modules.zeeho._DEFAULT_TAPI_APP_SECRET", "fake-native-secret"
+        ):
+            client = ZeehoClient(settings, session=session, clock_ms=lambda: 123)
+            result = client.daily_tasks(self.account)
+            h5_headers = client._headers(self.account, signing_data="month=2026-09")
+        self.assertTrue(result.ok)
+        self.assertEqual(remaining, [])
+        self.assertEqual([call["method"] for call in calls], ["GET", "GET", "POST", "GET", "POST", "PUT", "GET", "DELETE"])
+        for call in calls:
+            params = call["kwargs"].get("params", {})
+            signing_data = "&".join("{}={}".format(key, params[key]) for key in sorted(params))
+            signing_data += call["kwargs"]["data"].decode("utf-8")
+            headers = call["kwargs"]["headers"]
+            raw = signing_data + headers["Cfmoto-X-Param"] + "fake-native-secret"
+            expected = hashlib.md5(hashlib.sha1(raw.encode()).hexdigest().encode()).hexdigest()
+            self.assertEqual(headers["Cfmoto-X-Sign"], expected)
+        self.assertTrue(h5_headers["Cfmoto-X-Param"].startswith("appId=AiTXmBrm&"))
+        raw = "month=2026-09" + h5_headers["Cfmoto-X-Param"] + "fake-h5-secret"
+        self.assertEqual(h5_headers["Cfmoto-X-Sign"], hashlib.md5(hashlib.sha1(raw.encode()).hexdigest().encode()).hexdigest())
+
     def setUp(self):
-        self.account = Account("20260825003041623", "Bearer token", "account")
+        self.account = Account("test-user", "Bearer test-token", "account")
         self.today = "2026-09-15"
         self.content = "9月15日打卡"
         self.post_id = "20260915000000001"

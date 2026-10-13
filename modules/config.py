@@ -37,7 +37,8 @@ app:
   app_id: ""
   app_secret: ""
   # 原生 App 密钥对，供 App 域接口与 SMART 签到使用：
-  # h5 模式下可空（App 域回退 H5 密钥）；smart 模式必须成对填写。
+  # h5 模式下可空：新 H5 配对自动使用已验证的 App 配对，旧配对保留 H5 回退。
+  # 显式填写优先于自动兼容；smart 模式必须成对填写。
   tapi_app_id: ""
   tapi_app_secret: ""
   base_url: "https://h5.zeehoev.com"
@@ -345,7 +346,7 @@ def load_settings(config_path: Optional[Path] = None) -> Settings:
     app_secret, secret_was_decoded = decode_app_secret(
         str(app.get("app_secret") or DEFAULT_APP_SECRET)
     )
-    # 原生 App 域专用密钥对：可空，为空回退 H5 密钥；两者必须成对出现
+    # 原生 App 域专用密钥对：可空（选择策略在 zeeho.select_app_credentials），需成对出现
     raw_tapi_app_id = str(app.get("tapi_app_id") or "").strip()
     raw_tapi_app_secret = str(app.get("tapi_app_secret") or "").strip()
     if bool(raw_tapi_app_id) != bool(raw_tapi_app_secret):
