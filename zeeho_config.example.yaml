@@ -10,7 +10,8 @@ app:
   # 密钥会被服务端轮换，报 HTTP 430 code=30121 时按 README 重新提取。
   app_secret: ""
   # 原生 App 密钥对，供 App 域接口与 SMART 签到使用：
-  # h5 模式下可空（App 域回退 H5 密钥）；smart 模式必须成对填写。
+  # h5 模式下可空：新 H5 配对自动使用已验证的 App 配对，旧配对保留 H5 回退。
+  # 显式填写优先于自动兼容；smart 模式必须成对填写。
   # 抓包里 App 请求的 Cfmoto-X-Param 内 appId 为 S7qPWPU1（App 内置另一对密钥）；
   # appId 可从 App 请求头获取；对应 appSecret 需从 App 提取，不在请求头里。
   tapi_app_id: ""
